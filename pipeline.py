@@ -4,11 +4,13 @@ import carla
 import yaml
 from client import carlaClient
 from config import ConfigLoader
+from world import carlaWorld
 
 if __name__ == "__main__": 
     #Starting Carla Client
-    configLoader = ConfigLoader()
-    client = carlaClient()
+    config = ConfigLoader()
+    client = carlaClient() #assess if the class is needed
+    world = carlaWorld(config)
     
 
     pass
