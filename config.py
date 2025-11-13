@@ -17,6 +17,8 @@ class ConfigLoader():
     
     def get_host(self):
         return self.host
+    def get_port(self):
+        return self.port
 
 if __name__ == "__main__":
     testLoader = ConfigLoader()
