@@ -11,8 +11,8 @@ class ConfigLoader():
             cfg = load_config(config_path)
             self.host = cfg["carla"]["host"]
             self.port = cfg["carla"]["port"]
-            self.agent_count = cfg["experiment"]["agent_count"]
-            self.actor_count = cfg["experiment"]["actor_count"]
+            self.controlled_count = cfg["experiment"]["controlled_count"]
+            self.free_count = cfg["experiment"]["free_count"]
 
         except FileNotFoundError:
             print(f'File {config_path} Not Found')
@@ -22,10 +22,10 @@ class ConfigLoader():
         return self.host
     def get_port(self):
         return self.port
-    def get_agent_count(self):
-        return self.agent_count
-    def get_actor_count(self):
-        return self.actor_count
+    def get_controlled_count(self):
+        return self.controlled_count
+    def get_free_count(self):
+        return self.free_count
 
 if __name__ == "__main__":
     testLoader = ConfigLoader()

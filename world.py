@@ -11,7 +11,11 @@ class carlaWorld():
         self.manager = Manager(config)
         
         #print(self.world)
-        
+    def cleanup(self):
+        #The world cleaning up process includes
+
+        #Having the agent manager remove all the genrated agents
+        self.manager.cleanup()
 
 if __name__ == '__main__':
     carlaWorld(ConfigLoader())
