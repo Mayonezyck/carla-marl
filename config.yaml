@@ -1,3 +1,7 @@
 carla:
   host: "localhost"
   port: 2000
+
+experiment:
+  agent_count: 2
+  actor_count: 10
