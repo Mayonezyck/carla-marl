@@ -12,7 +12,7 @@ if __name__ == "__main__":
     config = ConfigLoader()
     client = carlaClient() #assess if the class is needed
     world = carlaWorld(config)
-    time.sleep(1) #Sleep for 10 seconds so that we can see the world
+    time.sleep(10) #Sleep for 10 seconds so that we can see the world
     world.cleanup()
 
     pass

@@ -8,9 +8,9 @@ class carlaWorld():
         world_port = config.get_port()
         self.client = carla.Client(world_host,world_port)
         self.world = self.client.get_world()
-        self.manager = Manager(config)
+        self.manager = Manager(config, self.world)
         
-        #print(self.world)
+
     def cleanup(self):
         #The world cleaning up process includes
 
