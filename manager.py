@@ -7,15 +7,19 @@ class Manager():
         self.free_count = config.get_free_count()
         print(f'We are going to add {self.controlled_count} agents, and {self.free_count} actors.')
         #Start a roster of controlled agents
-        self.roster_controlled = self.spawn_random_vehicles(self.controlled_count, world)
-        self.roster_free = []
+        self.spawn_both_controlled_and_free(self.controlled_count, self.free_count, world)
+        
+    
+    def spawn_both_controlled_and_free(self, nc, nf, world):
+        self.roster_controlled = self.spawn_random_vehicles(nc, world)
+        self.roster_free = self.spawn_random_vehicles(nf, world)
+        for v in self.roster_free:
+            v.set_autopilot(True)
 
-
-        pass
     def cleanup(self):
         print("Now we remove all the generated agents")
         self.destroy_actors(self.roster_controlled)
-    
+        self.destroy_actors(self.roster_free)
     
 
     def spawn_random_vehicles(self, n: int, world: carla.World):
