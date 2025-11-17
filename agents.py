@@ -1,3 +1,9 @@
+import random
+from typing import Dict, Any, List, Optional
+
+import carla
+import yaml
+
 class Agent:
     """
     Superclass for both Controlled_Agents and Free_Agents.
