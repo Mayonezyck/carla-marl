@@ -102,7 +102,7 @@ class Agent:
         rotation = carla.Rotation(roll=roll, pitch=pitch, yaw=yaw)
         return carla.Transform(location, rotation)
 
-    def _spawn_lidar(self, sensor_tf, name_suffix: str) -> Optional[carla.Actor]:
+    def _spawn_lidar(self, sensor_tf, cb, name_suffix: str) -> Optional[carla.Actor]:
     #def _spawn_lidar(self,sensor_tf) -> Optional[carla.Actor]:
         blueprint_library = self.world.get_blueprint_library()
         lidar_bp = blueprint_library.find("sensor.lidar.ray_cast")
@@ -126,7 +126,7 @@ class Agent:
             return None
 
         # Attach callback
-        lidar.listen(lambda data, self=self, tag=name_suffix: self.lidar_callback(data, tag))
+        lidar.listen(cb)
         self.sensors.append(lidar)
         print(f"[Agent] Spawned lidar ({name_suffix}) for {self.role_prefix}_{self.index}")
         return lidar
@@ -191,6 +191,7 @@ class Agent:
         Override in subclass or modify for logging/saving.
         """
         # For now, just print a tiny debug line occasionally
+        print('Warning, this is a default method that does nothing')
         print(f"[{self.role_prefix}_{self.index}] Lidar ({tag}) received frame {data.frame}")
 
     def camera_callback(self, image: carla.Image, tag: str) -> None:

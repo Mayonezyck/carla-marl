@@ -5,6 +5,7 @@ from free_agent import Free_Agents  # adjust import path as needed
 import random
 import carla
 from typing import List, Dict, Any, Optional
+import queue
 
 
 class Manager:
@@ -25,9 +26,11 @@ class Manager:
         self.active_flags: List[bool] = []        # active mask, same length as agents
         self.controlled_agents: List[Controlled_Agents] = []
         self.free_agents: List[Free_Agents] = []
+        
 
         # Map vehicle.id -> index in self.agents for quick lookup
         self.vehicle_to_index: Dict[int, int] = {}
+        
 
         # Read counts from config
         nc, nf = config.get_headcounts()

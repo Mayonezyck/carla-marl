@@ -2,6 +2,7 @@ import carla
 from agents import Agent
 import random
 from typing import Dict, Any, List, Optional
+import queue
 
 
 class Controlled_Agents(Agent):
@@ -23,8 +24,11 @@ class Controlled_Agents(Agent):
         # )
 
         # Destination = random valid driving waypoint in the world
-        
+        self._lidar_queue: "queue.Queue[tuple[int, carla.LidarMeasurement]]" = queue.Queue()
+        self._last_lidar: tuple[int, carla.LidarMeasurement] | None = None
+
         self._setup_sensors_from_config()
+
         
 
     def _setup_sensors_from_config(self) -> None:
@@ -32,9 +36,29 @@ class Controlled_Agents(Agent):
         if sensors_cfg == "lidar":
             lidar_tf = self.config.get_lidar_tf()
             #lidar_cfg = self.config.get_lidar_cfg()
-            self._spawn_lidar(lidar_tf,'full')
+            def _lidar_callback(data: carla.LidarMeasurement, idx=self.index):
+                # Just push into queue + keep last for non-blocking access
+                print('debug: using actual callback')
+                item = (data.frame, data)
+                self._last_lidar = item
+                # Non-blocking: drop if queue is "full" to avoid buildup (optional)
+                try:
+                    self._lidar_queue.put_nowait(item)
+                except queue.Full:
+                    pass
+            self._spawn_lidar(lidar_tf,_lidar_callback,'full')
+            
 
-    
+    def get_lidar_blocking(self, timeout: float = 1.0):
+        """Get the next lidar measurement (blocking)."""
+        try:
+            return self._lidar_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def get_lidar_latest(self):
+        """Get the latest lidar measurement (non-blocking, may be None)."""
+        return self._last_lidar
 
         # Lidar (full)
         # lidar_cfg = sensors_cfg.get("lidar", {})

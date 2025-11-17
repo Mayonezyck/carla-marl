@@ -16,4 +16,4 @@ experiment:
     yaw: 0.0
 
 debug:
-  delta_seconds: 0.5
+  delta_seconds: 0.05
