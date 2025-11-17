@@ -27,6 +27,9 @@ class Agent:
         self.index = index
         self.config = config
         self.role_prefix = role_prefix
+        self.starting_point = None
+        self.destination = None
+
 
         self.vehicle: Optional[carla.Actor] = None
         self.sensors: List[carla.Actor] = []
@@ -60,9 +63,17 @@ class Agent:
                 bp.set_attribute("color", color)
 
             # Role name for debugging & filtering
-            bp.set_attribute("role_name", f"{self.role_prefix}_{self.index}")
+            
 
             spawn_point = spawn_points[attempts % len(spawn_points)]
+            self.starting_point = spawn_point.location
+            if self.role_prefix == "controlled_agent":
+                start = self.starting_point
+                self.destination: carla.Location = self._pick_random_destination()
+                dest = self.destination
+                bp.set_attribute("role_name", f"{self.role_prefix}_{self.index}|{start.x:.2f},{start.y:.2f},{start.z:.2f}|{dest.x:.2f},{dest.y:.2f},{dest.z:.2f}")
+            else:
+                bp.set_attribute("role_name", f"{self.role_prefix}_{self.index}")
             vehicle = self.world.try_spawn_actor(bp, spawn_point)
 
             attempts += 1
@@ -145,6 +156,33 @@ class Agent:
         self.sensors.append(camera)
         print(f"[Agent] Spawned camera ({name_suffix}) for {self.role_prefix}_{self.index}")
         return camera
+
+    def _pick_random_destination(self) -> carla.Location:
+        """
+        Pick a random valid driving waypoint as destination.
+        Returns its location.
+        """
+        carla_map = self.world.get_map()
+
+        # generate dense-enough waypoints, e.g. every 2 meters
+        waypoints = carla_map.generate_waypoints(2.0)
+
+        # only keep driving lanes
+        driving_wps = [wp for wp in waypoints if wp.lane_type == carla.LaneType.Driving]
+        if not driving_wps:
+            raise RuntimeError("[Controlled_Agents] No driving waypoints found to choose a destination from.")
+
+        # try to avoid picking a destination extremely close to the start
+        if self.starting_point is not None:
+            for _ in range(20):
+                wp = random.choice(driving_wps)
+                loc = wp.transform.location
+                if loc.distance(self.starting_point) > 10.0:  # 10 meters away
+                    return loc
+            # fallback: if all are close (we’re on a tiny map), just return any
+            return random.choice(driving_wps).transform.location
+        else:
+            return random.choice(driving_wps).transform.location
 
     # Default callbacks: you can override or extend in subclasses if needed
     def lidar_callback(self, data: carla.LidarMeasurement, tag: str) -> None:

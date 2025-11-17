@@ -918,7 +918,86 @@ class World(object):
         self.original_surface_size = None
         self.hero_surface = None
         self.actors_surface = None
+        # list of (start_loc, dest_loc), where each is a carla.Location
+        self.routes = []
 
+    def set_routes(self, routes):
+        """
+        routes: list of (start_loc, dest_loc), each start_loc/dest_loc is carla.Location
+        """
+        self.routes = routes or []
+
+    def _render_routes(self, surface):
+        """Draws start/destination markers and lines for each route in self.routes."""
+        for start_loc, dest_loc in self.routes:
+            sx, sy = self.map_image.world_to_pixel(start_loc)
+            dx, dy = self.map_image.world_to_pixel(dest_loc)
+
+            # start point: green
+            pygame.draw.circle(surface, COLOR_CHAMELEON_0, (sx, sy),
+                                max(2, int(3 * self.map_image.scale)))
+            # destination: red
+            pygame.draw.circle(surface, COLOR_SCARLET_RED_0, (dx, dy),
+                                max(2, int(3 * self.map_image.scale)))
+
+            # line between them
+            pygame.draw.line(surface, COLOR_CHAMELEON_1, (sx, sy), (dx, dy),
+                                max(1, int(2 * self.map_image.scale)))
+
+    def _parse_route_from_role_name(self, role_name):
+        """
+        role_name format:
+            controlled_agent|sx,sy,sz|dx,dy,dz
+        Returns (start_loc, dest_loc) as carla.Location, or (None, None) if parsing fails.
+        """
+        try:
+            parts = role_name.split('|')
+            if len(parts) != 3:
+                return None, None
+
+            tag, start_str, dest_str = parts
+            if not tag.startswith('controlled_agent'):
+                return None, None
+
+            sx, sy, sz = map(float, start_str.split(','))
+            dx, dy, dz = map(float, dest_str.split(','))
+
+            start_loc = carla.Location(x=sx, y=sy, z=sz)
+            dest_loc  = carla.Location(x=dx, y=dy, z=dz)
+            return start_loc, dest_loc
+        except Exception:
+            # bad / old role_name → just ignore
+            return None, None
+
+    def _draw_route_for_vehicle(self, surface, world_to_pixel, start_loc, dest_loc):
+        """Draw start/dest markers + line on given surface."""
+        sx, sy = world_to_pixel(start_loc)
+        dx, dy = world_to_pixel(dest_loc)
+
+        # Start point (green)
+        pygame.draw.circle(
+            surface,
+            COLOR_CHAMELEON_0,
+            (sx, sy),
+            max(2, int(3 * self.map_image.scale))
+        )
+
+        # Destination point (red)
+        pygame.draw.circle(
+            surface,
+            COLOR_SCARLET_RED_0,
+            (dx, dy),
+            max(2, int(3 * self.map_image.scale))
+        )
+
+        # Line between them
+        pygame.draw.line(
+            surface,
+            COLOR_CHAMELEON_1,
+            (sx, sy),
+            (dx, dy),
+            max(1, int(2 * self.map_image.scale))
+        )
     def _get_data_from_carla(self):
         """Retrieves the data from the server side"""
         try:
@@ -1212,28 +1291,42 @@ class World(object):
             pygame.draw.polygon(surface, color, corners)
 
     def _render_vehicles(self, surface, list_v, world_to_pixel):
-        """Renders the vehicles' bounding boxes"""
+        """Renders the vehicles' bounding boxes + routes (for controlled agents)."""
         for v in list_v:
+            actor = v[0]
+            transform = v[1]
+
+            role_name = actor.attributes.get('role_name', '')
+
             color = COLOR_SKY_BLUE_0
-            if int(v[0].attributes['number_of_wheels']) == 2:
+            if int(actor.attributes.get('number_of_wheels', '4')) == 2:
                 color = COLOR_CHOCOLATE_1
-            if v[0].attributes['role_name'] == 'hero':
+            if role_name == 'hero':
                 color = COLOR_CHAMELEON_0
-            if v[0].attributes['role_name'].startswith('controlled_agent'):
+            if role_name.startswith('controlled_agent'):
                 color = COLOR_SCARLET_RED_0
-                
+
             # Compute bounding box points
-            bb = v[0].bounding_box.extent
-            corners = [carla.Location(x=-bb.x, y=-bb.y),
-                       carla.Location(x=bb.x - 0.8, y=-bb.y),
-                       carla.Location(x=bb.x, y=0),
-                       carla.Location(x=bb.x - 0.8, y=bb.y),
-                       carla.Location(x=-bb.x, y=bb.y),
-                       carla.Location(x=-bb.x, y=-bb.y)
-                       ]
-            v[1].transform(corners)
+            bb = actor.bounding_box.extent
+            corners = [
+                carla.Location(x=-bb.x,       y=-bb.y),
+                carla.Location(x=bb.x - 0.8,  y=-bb.y),
+                carla.Location(x=bb.x,        y=0),
+                carla.Location(x=bb.x - 0.8,  y=bb.y),
+                carla.Location(x=-bb.x,       y=bb.y),
+                carla.Location(x=-bb.x,       y=-bb.y)
+            ]
+            transform.transform(corners)
             corners = [world_to_pixel(p) for p in corners]
-            pygame.draw.lines(surface, color, False, corners, int(math.ceil(4.0 * self.map_image.scale)))
+            pygame.draw.lines(surface, color, False, corners,
+                              int(math.ceil(4.0 * self.map_image.scale)))
+
+            # --- Route overlay for controlled agents ---
+            if role_name.startswith('controlled_agent'):
+                start_loc, dest_loc = self._parse_route_from_role_name(role_name)
+                if start_loc is not None and dest_loc is not None:
+                    self._draw_route_for_vehicle(surface, world_to_pixel, start_loc, dest_loc)
+
 
     def render_actors(self, surface, vehicles, traffic_lights, speed_limits, walkers):
         """Renders all the actors"""
