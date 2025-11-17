@@ -1,113 +1,150 @@
 from config import ConfigLoader
+from controlled_agent import Controlled_Agents
+from free_agent import Free_Agents  # adjust import path as needed
+
 import random
 import carla
-class Manager():
-    def __init__(self, config, world):
-        self.controlled_count = config.get_controlled_count() #TODO: Determine if they should be stored as fields? Or they should just be passed.
-        self.free_count = config.get_free_count()
-        print(f'We are going to add {self.controlled_count} agents, and {self.free_count} actors.')
-        #Start a roster of controlled agents
-        self.spawn_both_controlled_and_free(self.controlled_count, self.free_count, world)
-        
-    
-    def spawn_both_controlled_and_free(self, nc, nf, world):
-        # This method spawn both the controlled vehicles and free vehicles.
-        self.roster_controlled = self.spawn_random_vehicles(nc, world)
-        self.roster_free = self.spawn_random_vehicles(nf, world)
-        for v in self.roster_free:
-            v.set_autopilot(True)
+from typing import List, Dict, Any, Optional
 
-    def cleanup(self):
-        print("Now we remove all the generated agents")
-        self.destroy_actors(self.roster_controlled)
-        self.destroy_actors(self.roster_free)
-    
 
-    def spawn_random_vehicles(self, n: int, world: carla.World):
+class Manager:
+    def __init__(self, config: Dict[str, Any], world: carla.World):
         """
-        Spawn up to n random vehicles at random spawn points in the given CARLA world.
-
-        Args:
-            n (int): Number of vehicles to try to spawn.
-            world (carla.World): The world in which to spawn vehicles.
-
-        Returns:
-            list[carla.Actor]: List of successfully spawned vehicle actors.
+        The manager handles both the spawning of the controlled and free agents.
+        According to the config, it will generate n controlled agents and m free agents.
+        It keeps:
+            - A list of all agents (controlled + free)
+            - A parallel list of "active" flags
+            - Separate lists of controlled and free agents
         """
-        blueprint_library = world.get_blueprint_library()
-        vehicle_blueprints = blueprint_library.filter("vehicle.*")
+        self.config = config
+        self.world = world
 
-        # All available spawn points in the map
-        spawn_points = world.get_map().get_spawn_points()
-        if not spawn_points:
-            print("[spawn_random_vehicles] No spawn points available in this map.")
-            return []
+        # Agent containers
+        self.agents: List[Any] = []               # all agents (controlled + free)
+        self.active_flags: List[bool] = []        # active mask, same length as agents
+        self.controlled_agents: List[Controlled_Agents] = []
+        self.free_agents: List[Free_Agents] = []
 
-        # Shuffle spawn points for randomness
-        random.shuffle(spawn_points)
+        # Map vehicle.id -> index in self.agents for quick lookup
+        self.vehicle_to_index: Dict[int, int] = {}
 
-        num_to_spawn = min(n, len(spawn_points))
-        spawned_vehicles = []
+        # Read counts from config
+        nc, nf = config.get_headcounts()
 
-        for i in range(num_to_spawn):
-            bp = random.choice(vehicle_blueprints)
+        # Spawn everything
+        self.spawn_both_controlled_and_free(nc, nf)
 
-            # Randomize color if supported
-            if bp.has_attribute("color"):
-                color = random.choice(bp.get_attribute("color").recommended_values)
-                bp.set_attribute("color", color)
-
-            # Optional role name
-            bp.set_attribute("role_name", f"random_vehicle_{i}")
-
-            transform = spawn_points[i]
-
-            vehicle = world.try_spawn_actor(bp, transform)
-            if vehicle is not None:
-                spawned_vehicles.append(vehicle)
-                print(f'Spawned {vehicle}')
-            else:
-                # If spawn failed (e.g., collision at spawn), try a few more random points
-                extra_trials = 5
-                success = False
-                for _ in range(extra_trials):
-                    transform = random.choice(spawn_points)
-                    vehicle = world.try_spawn_actor(bp, transform)
-                    if vehicle is not None:
-                        spawned_vehicles.append(vehicle)
-                        success = True
-                        break
-                if not success:
-                    print("[spawn_random_vehicles] Failed to spawn a vehicle after extra trials.")
-
-        if len(spawned_vehicles) < n:
-            print(f"[spawn_random_vehicles] Requested {n}, but only spawned {len(spawned_vehicles)} vehicles.")
-
-        return spawned_vehicles
-    
-
-    def destroy_actors(self, actors):
+    # --------------------------------------------------
+    # Spawning
+    # --------------------------------------------------
+    def spawn_both_controlled_and_free(self, nc: int, nf: int) -> None:
         """
-        Destroys all CARLA actors in the given iterable.
-
-        Args:
-            actors (Iterable[carla.Actor]): List (or any iterable) of CARLA actors to destroy.
+        Spawn nc controlled agents and nf free agents.
+        Ensure the actual successfully generated ones match the required count
+        (or raise if impossible).
         """
-        if not actors:
-            print("[destroy_actors] No actors to destroy.")
+        # Spawn controlled agents
+        for i in range(nc):
+            try:
+                agent = Controlled_Agents(self.world, i, self.config)
+            except Exception as e:
+                print(f"[Manager] Failed to spawn controlled agent {i}: {e}")
+                raise
+
+            self._register_agent(agent, is_controlled=True)
+
+        # Spawn free agents
+        for i in range(nf):
+            try:
+                agent = Free_Agents(self.world, i, self.config)
+            except Exception as e:
+                print(f"[Manager] Failed to spawn free agent {i}: {e}")
+                raise
+
+            self._register_agent(agent, is_controlled=False)
+
+        print(
+            f"[Manager] Spawned {len(self.controlled_agents)} controlled agents "
+            f"and {len(self.free_agents)} free agents."
+        )
+
+    def _register_agent(self, agent: Any, is_controlled: bool) -> None:
+        """
+        Internal helper to add an agent into all tracking structures.
+        """
+        self.agents.append(agent)
+        self.active_flags.append(True)
+
+        if agent.vehicle is not None:
+            self.vehicle_to_index[agent.vehicle.id] = len(self.agents) - 1
+
+        if is_controlled:
+            self.controlled_agents.append(agent)
+        else:
+            self.free_agents.append(agent)
+
+    # --------------------------------------------------
+    # Cleanup & removal
+    # --------------------------------------------------
+    def cleanup(self) -> None:
+        """
+        Destroy all vehicles and sensors (by calling destroy_agent() of each agent),
+        and mark them inactive.
+        """
+        print("[Manager] Cleaning up all agents...")
+        for idx, agent in enumerate(self.agents):
+            if agent is None:
+                continue
+            if self.active_flags[idx]:
+                try:
+                    agent.destroy_agent()
+                except Exception as e:
+                    print(f"[Manager] Error destroying agent {idx}: {e}")
+                self.active_flags[idx] = False
+
+        self.vehicle_to_index.clear()
+        print("[Manager] Cleanup complete.")
+
+    def remove_vehicle(self, vehicle: carla.Actor) -> None:
+        """
+        When called, remove the specific vehicle and its sensors from the world,
+        also mark the vehicle as inactive.
+        """
+        if vehicle is None:
+            print("[Manager] remove_vehicle called with None.")
             return
 
-        for actor in actors:
-            try:
-                if actor.is_alive:
-                    actor.destroy()
-            except RuntimeError as e:
-                # Actor may already be destroyed or invalid
-                print(f"[destroy_actors] Failed to destroy actor {actor.id if actor else 'unknown'}: {e}")
+        idx = self.vehicle_to_index.get(vehicle.id, None)
+        if idx is None:
+            print(f"[Manager] Vehicle id {vehicle.id} not managed by this Manager.")
+            return
 
-        print(f"[destroy_actors] Destroyed {len(actors)} actors.")
+        agent = self.agents[idx]
+        if agent is None:
+            print(f"[Manager] No agent found for index {idx}.")
+            return
+
+        print(f"[Manager] Removing vehicle id {vehicle.id} (agent index {idx})...")
+        try:
+            agent.destroy_agent()
+        except Exception as e:
+            print(f"[Manager] Error destroying agent {idx}: {e}")
+
+        self.active_flags[idx] = False
+        # Remove from vehicle lookup map
+        self.vehicle_to_index.pop(vehicle.id, None)
+
+        # Note: we don't physically remove the agent object from the lists,
+        # just mark it inactive. That way indices stay stable.
+
+    # Optional: convenience to remove by agent rather than by vehicle
+    def remove_agent(self, agent: Any) -> None:
+        if agent is None:
+            return
+        vehicle = getattr(agent, "vehicle", None)
+        if vehicle is not None:
+            self.remove_vehicle(vehicle)
 
 
 
-if __name__ == "__main__":
-    Manager()

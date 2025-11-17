@@ -48,7 +48,7 @@ class Agent:
 
         random.shuffle(spawn_points)
 
-        max_attempts = self.config.get("spawn", {}).get("max_attempts", 10)
+        max_attempts = self.config.get_spawn_max_attempts()
         attempts = 0
         vehicle = None
 
@@ -91,21 +91,23 @@ class Agent:
         rotation = carla.Rotation(roll=roll, pitch=pitch, yaw=yaw)
         return carla.Transform(location, rotation)
 
-    def _spawn_lidar(self, sensor_cfg: Dict[str, Any], name_suffix: str) -> Optional[carla.Actor]:
+    def _spawn_lidar(self, sensor_tf, name_suffix: str) -> Optional[carla.Actor]:
+    #def _spawn_lidar(self,sensor_tf) -> Optional[carla.Actor]:
         blueprint_library = self.world.get_blueprint_library()
         lidar_bp = blueprint_library.find("sensor.lidar.ray_cast")
         if lidar_bp is None:
             print("[Agent] Lidar blueprint not found.")
             return None
 
-        attributes = sensor_cfg.get("attributes", {})
-        for key, value in attributes.items():
-            if lidar_bp.has_attribute(key):
-                lidar_bp.set_attribute(key, str(value))
+        # attributes = sensor_cfg.get("attributes", {})
+        # for key, value in attributes.items():
+        #     if lidar_bp.has_attribute(key):
+        #         lidar_bp.set_attribute(key, str(value))
 
-        lidar_bp.set_attribute("role_name", f"{self.role_prefix}_{self.index}_lidar_{name_suffix}")
+        #lidar_bp.set_attribute("role_name", f"{self.role_prefix}_{self.index}_lidar_{name_suffix}")
 
-        tf = self._dict_to_transform(sensor_cfg.get("transform", {}))
+        #tf = self._dict_to_transform(sensor_tf)
+        tf = carla.Transform(carla.Location(sensor_tf[0],sensor_tf[1],sensor_tf[2]),carla.Rotation(sensor_tf[3],sensor_tf[4],sensor_tf[5]))
 
         lidar = self.world.try_spawn_actor(lidar_bp, tf, attach_to=self.vehicle)
         if lidar is None:
