@@ -5,7 +5,7 @@ from free_agent import Free_Agents  # adjust import path as needed
 import random
 import numpy as np
 import carla
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Sequence
 import queue
 
 
@@ -127,6 +127,30 @@ class Manager:
 
         return obs.astype(np.float32)
     
+    def apply_actions_to_controlled(self, actions: Sequence[Sequence[float]]) -> None:
+        """
+        Apply actions to all controlled agents.
+
+        actions: iterable of (throttle, steer, brake) for each controlled agent,
+                 in the same order as self.controlled_agents.
+        """
+        if len(actions) != len(self.controlled_agents):
+            print(
+                "[Manager] Warning: got {} actions for {} controlled agents.".format(
+                    len(actions), len(self.controlled_agents)
+                )
+            )
+
+        for agent, act in zip(self.controlled_agents, actions):
+            if agent is None or agent.vehicle is None:
+                continue
+            try:
+                print(f'now applying {act} to {agent}')
+                agent.apply_action(act)
+            except Exception as e:
+                print("[Manager] Error applying action to agent {}: {}".format(agent.index, e))
+
+
     def get_controlled_lidar_observations(
         self,
         target_n: int = 16000,
