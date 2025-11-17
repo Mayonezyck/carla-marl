@@ -72,9 +72,9 @@ class Agent:
                 f"[Agent] Could not spawn vehicle for {self.role_prefix}_{self.index} "
                 f"after {max_attempts} attempts."
             )
-
+        self.initial_pos = spawn_point
         self.vehicle = vehicle
-        print(f"[Agent] Spawned {self.role_prefix}_{self.index} at {vehicle.get_location()}")
+        print(f"[Agent] Spawned {self.role_prefix}_{self.index} at {self.initial_pos}")
 
     # ---------- sensor helpers & callbacks ----------
 
