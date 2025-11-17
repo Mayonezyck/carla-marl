@@ -110,6 +110,8 @@ class Agent:
             print("[Agent] Lidar blueprint not found.")
             return None
 
+        lidar_bp.set_attribute('rotation_frequency', '10.0')      # 10 rev/s
+        lidar_bp.set_attribute('sensor_tick', str(1.0 / 10.0))    # 0.1s per measurement
         # attributes = sensor_cfg.get("attributes", {})
         # for key, value in attributes.items():
         #     if lidar_bp.has_attribute(key):

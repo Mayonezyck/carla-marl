@@ -29,39 +29,20 @@ class CarlaWorld:
         # Create manager
         self.manager = Manager(config, self.world)
 
-    def setup(self):
-        # Let manager spawn stuff, only once
-        if hasattr(self.manager, "setup"):
-            self.manager.setup()
-        elif hasattr(self.manager, "create_agents"):
-            self.manager.create_agents()
-        # else: do nothing
 
     def run(self):
         # Wall-clock pacing (can be same as fixed_dt)
         wall_dt = getattr(self.config, "get_wall_dt", lambda: self.fixed_dt)()
 
         try:
-            i = 0 
             while True:
                 # *** THIS is the only place we tick the world ***
+                print('tick')
                 snapshot = self.world.tick()
-                print("tick")  
-                print(i)
-                print(self.manager.controlled_agents[0].vehicle.get_velocity())
-                print(self.manager.controlled_agents[0].vehicle.get_acceleration())
-                if i%20 == 0:
-                    print('gas up')
-                    self.manager.controlled_agents[0].apply_action([1,0,0])
-                if i%25 == 0:
-                    print('release')
-                    self.manager.controlled_agents[0].apply_action([0,0,0])
-                # Optional: if manager has per-step logic, call it
                 if hasattr(self.manager, "tick"):
                     self.manager.tick(snapshot)
                 elif hasattr(self.manager, "step"):
                     self.manager.step(snapshot)
-                i += 1
                 time.sleep(wall_dt)
 
         except KeyboardInterrupt:
@@ -81,5 +62,4 @@ class CarlaWorld:
 if __name__ == "__main__":
     cfg = ConfigLoader()
     cw = CarlaWorld(cfg)
-    cw.setup()
     cw.run()
