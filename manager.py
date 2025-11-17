@@ -11,6 +11,7 @@ class Manager():
         
     
     def spawn_both_controlled_and_free(self, nc, nf, world):
+        # This method spawn both the controlled vehicles and free vehicles.
         self.roster_controlled = self.spawn_random_vehicles(nc, world)
         self.roster_free = self.spawn_random_vehicles(nf, world)
         for v in self.roster_free:
