@@ -14,3 +14,6 @@ experiment:
     roll: 0.0
     pitch: 0.0
     yaw: 0.0
+
+debug:
+  delta_seconds: 0.5

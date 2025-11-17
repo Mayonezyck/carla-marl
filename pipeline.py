@@ -5,14 +5,15 @@ import yaml
 import time
 from client import carlaClient
 from config import ConfigLoader
-from world import carlaWorld
+from world import CarlaWorld
 
 if __name__ == "__main__": 
     #Starting Carla Client
     config = ConfigLoader()
     client = carlaClient() #assess if the class is needed
-    world = carlaWorld(config)
-    time.sleep(10) #Sleep for 10 seconds so that we can see the world
-    world.cleanup()
+    world = CarlaWorld(config)
+    world.setup()
+    world.run()
+    #time.sleep(10) #Sleep for 10 seconds so that we can see the world
 
     pass

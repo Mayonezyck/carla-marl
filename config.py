@@ -16,6 +16,7 @@ class ConfigLoader():
             self.spawn_max_attempts = cfg["experiment"]["spawn_max_attempts"]
             self.sensor_type = cfg["experiment"]["sensor_type"]
             self.lidar_tf = [cfg["experiment"]['lidar']['x'],cfg["experiment"]['lidar']['y'],cfg["experiment"]['lidar']['z'],cfg["experiment"]['lidar']['roll'],cfg["experiment"]['lidar']['pitch'],cfg["experiment"]['lidar']['yaw']]
+            self.delta_seconds = cfg["debug"]["delta_seconds"]
 
         except FileNotFoundError:
             print(f'File {config_path} Not Found')
@@ -37,6 +38,9 @@ class ConfigLoader():
         return self.sensor_type
     def get_lidar_tf(self):
         return self.lidar_tf
+    #for debug
+    def get_fixed_delta_seconds(self):
+        return self.delta_seconds
 
 if __name__ == "__main__":
     testLoader = ConfigLoader()
