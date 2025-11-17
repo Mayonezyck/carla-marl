@@ -110,8 +110,9 @@ class Agent:
             print("[Agent] Lidar blueprint not found.")
             return None
 
-        lidar_bp.set_attribute('rotation_frequency', '10.0')      # 10 rev/s
-        lidar_bp.set_attribute('sensor_tick', str(1.0 / 10.0))    # 0.1s per measurement
+        lidar_bp.set_attribute('rotation_frequency', '20.0')      # 20 rev/s
+        lidar_bp.set_attribute('sensor_tick', '0.1')    # 0.1s per measurement
+        lidar_bp.set_attribute('horizontal_fov', '360.0') 
         # attributes = sensor_cfg.get("attributes", {})
         # for key, value in attributes.items():
         #     if lidar_bp.has_attribute(key):
@@ -130,6 +131,9 @@ class Agent:
         # Attach callback
         lidar.listen(cb)
         self.sensors.append(lidar)
+        print("rotation_frequency:", float(lidar.attributes['rotation_frequency']))
+        print("sensor_tick:", float(lidar.attributes['sensor_tick']))
+
         print(f"[Agent] Spawned lidar ({name_suffix}) for {self.role_prefix}_{self.index}")
         return lidar
 

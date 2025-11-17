@@ -37,16 +37,26 @@ class Controlled_Agents(Agent):
             lidar_tf = self.config.get_lidar_tf()
             #lidar_cfg = self.config.get_lidar_cfg()
             def _lidar_callback(data: carla.LidarMeasurement, idx=self.index):
+                # import open3d as o3d
+                # import numpy as np
                 # Just push into queue + keep last for non-blocking access
                 print('debug: using actual callback')
+                print(len(data.raw_data))
                 item = (data.frame, data)
                 self._last_lidar = item
+                # points = np.frombuffer(data.raw_data, dtype=np.float32)
+                # points = points.reshape(-1, 4)[:, :3]
+
+                # pcd = o3d.geometry.PointCloud()
+                # pcd.points = o3d.utility.Vector3dVector(points)
+                # o3d.io.write_point_cloud('test_points.pcd', pcd)
                 # Non-blocking: drop if queue is "full" to avoid buildup (optional)
                 try:
                     self._lidar_queue.put_nowait(item)
                 except queue.Full:
                     pass
             self._spawn_lidar(lidar_tf,_lidar_callback,'full')
+            
             
     def apply_action(self, action) -> None:
         """

@@ -38,6 +38,9 @@ class CarlaWorld:
             while True:
                 # *** THIS is the only place we tick the world ***
                 print('tick')
+
+                _, batch_obs=self.manager.get_controlled_lidar_observations()
+                print("batch_obs shape:", batch_obs.shape)
                 snapshot = self.world.tick()
                 if hasattr(self.manager, "tick"):
                     self.manager.tick(snapshot)

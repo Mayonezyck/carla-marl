@@ -3,8 +3,9 @@ from controlled_agent import Controlled_Agents
 from free_agent import Free_Agents  # adjust import path as needed
 
 import random
+import numpy as np
 import carla
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import queue
 
 
@@ -86,6 +87,75 @@ class Manager:
             self.controlled_agents.append(agent)
         else:
             self.free_agents.append(agent)
+
+    def _process_lidar_measurement(
+        self,
+        lidar_measurement: Optional[carla.LidarMeasurement],
+        target_n: int = 16000,
+    ) -> np.ndarray:
+        """
+        Convert a raw CARLA LidarMeasurement into a fixed-size (target_n, 3) array.
+
+        Typical RL preprocessing:
+          - Convert raw buffer → (N, 3) XYZ points.
+          - If N > target_n: random downsample.
+          - If N < target_n: zero-pad at the end.
+
+        Returns
+        -------
+        obs : np.ndarray
+            Shape (target_n, 3), dtype float32.
+        """
+        # If no measurement yet, just return zeros
+        if lidar_measurement is None:
+            return np.zeros((target_n, 3), dtype=np.float32)
+
+        # raw_data is float32 [x, y, z, intensity] for each point
+        pts = np.frombuffer(lidar_measurement.raw_data, dtype=np.float32)
+        pts = pts.reshape(-1, 4)[:, :3]  # (N, 3) → drop intensity
+
+        n_points = pts.shape[0]
+
+        if n_points >= target_n:
+            # Randomly sample target_n points (no replacement)
+            idx = np.random.choice(n_points, target_n, replace=False)
+            obs = pts[idx]
+        else:
+            # Pad with zeros to reach target_n
+            pad = np.zeros((target_n - n_points, 3), dtype=np.float32)
+            obs = np.vstack([pts, pad])
+
+        return obs.astype(np.float32)
+    
+    def get_controlled_lidar_observations(
+        self,
+        target_n: int = 16000,
+    ) -> Tuple[List[Optional[int]], np.ndarray]:
+        """
+        Collect latest lidar observations from all controlled agents and
+        convert them into a fixed-size batch.
+        """
+        frames: List[Optional[int]] = []
+        obs_list: List[np.ndarray] = []
+
+        for agent in self.controlled_agents:
+            latest = agent.get_lidar_latest()
+            if latest is None:
+                frame_id = None
+                lidar_meas = None
+            else:
+                frame_id, lidar_meas = latest
+
+            frames.append(frame_id)
+            obs = self._process_lidar_measurement(lidar_meas, target_n=target_n)
+            obs_list.append(obs)
+
+        if len(obs_list) == 0:
+            return [], np.zeros((0, target_n, 3), dtype=np.float32)
+
+        batch_obs = np.stack(obs_list, axis=0)
+        return frames, batch_obs
+
 
     # --------------------------------------------------
     # Cleanup & removal
