@@ -42,17 +42,26 @@ class CarlaWorld:
         wall_dt = getattr(self.config, "get_wall_dt", lambda: self.fixed_dt)()
 
         try:
+            i = 0 
             while True:
                 # *** THIS is the only place we tick the world ***
                 snapshot = self.world.tick()
-                print("tick")
-
+                print("tick")  
+                print(i)
+                print(self.manager.controlled_agents[0].vehicle.get_velocity())
+                print(self.manager.controlled_agents[0].vehicle.get_acceleration())
+                if i%20 == 0:
+                    print('gas up')
+                    self.manager.controlled_agents[0].apply_action([1,0,0])
+                if i%25 == 0:
+                    print('release')
+                    self.manager.controlled_agents[0].apply_action([0,0,0])
                 # Optional: if manager has per-step logic, call it
                 if hasattr(self.manager, "tick"):
                     self.manager.tick(snapshot)
                 elif hasattr(self.manager, "step"):
                     self.manager.step(snapshot)
-
+                i += 1
                 time.sleep(wall_dt)
 
         except KeyboardInterrupt:

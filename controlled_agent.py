@@ -48,6 +48,17 @@ class Controlled_Agents(Agent):
                     pass
             self._spawn_lidar(lidar_tf,_lidar_callback,'full')
             
+    def apply_action(self, action) -> None:
+        """
+        action: for example [throttle, steer, brake]
+        """
+        throttle, steer, brake = float(action[0]), float(action[1]), float(action[2])
+        control = carla.VehicleControl(
+            throttle=max(0.0, min(1.0, throttle)),
+            steer=max(-1.0, min(1.0, steer)),
+            brake=max(0.0, min(1.0, brake)),
+        )
+        self.vehicle.apply_control(control)
 
     def get_lidar_blocking(self, timeout: float = 1.0):
         """Get the next lidar measurement (blocking)."""
