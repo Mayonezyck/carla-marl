@@ -1065,10 +1065,17 @@ class World(object):
         self.result_surface.set_colorkey(COLOR_BLACK)
 
         # Start hero mode by default
-        self.select_hero_actor()
-        self.hero_actor.set_autopilot(False)
-        self._input.wheel_offset = HERO_DEFAULT_SCALE
-        self._input.control = carla.VehicleControl()
+        # self.select_hero_actor()
+        # self.hero_actor.set_autopilot(False)
+        # self._input.wheel_offset = HERO_DEFAULT_SCALE
+        # self._input.control = carla.VehicleControl()
+        # Start in map-only mode: no hero vehicle, no control
+        self.hero_actor = None
+        self.spawned_hero = None
+        self.hero_transform = None
+        self._input.wheel_offset = MAP_DEFAULT_SCALE
+        self._input.control = None
+
 
         # Register event for receiving server tick
         weak_self = weakref.ref(self)
@@ -1154,6 +1161,7 @@ class World(object):
             'Client:  % 16s FPS' % round(clock.get_fps()),
             'Simulation Time: % 12s' % datetime.timedelta(seconds=int(self.simulation_time)),
             'Map Name:          %10s' % self.town_map.name,
+            'Sync Mode:     %10s' % self.world.get_settings().synchronous_mode
         ]
 
         self._hud.add_info(self.name, info_text)
@@ -1505,20 +1513,20 @@ class InputControl(object):
                     exit_game()
                 elif event.key == K_h or (event.key == K_SLASH and pygame.key.get_mods() & KMOD_SHIFT):
                     self._hud.help.toggle()
-                elif event.key == K_TAB:
-                    # Toggle between hero and map mode
-                    if self._world.hero_actor is None:
-                        self._world.select_hero_actor()
-                        self.wheel_offset = HERO_DEFAULT_SCALE
-                        self.control = carla.VehicleControl()
-                        self._hud.notification('Hero Mode')
-                    else:
-                        self.wheel_offset = MAP_DEFAULT_SCALE
-                        self.mouse_offset = [0, 0]
-                        self.mouse_pos = [0, 0]
-                        self._world.scale_offset = [0, 0]
-                        self._world.hero_actor = None
-                        self._hud.notification('Map Mode')
+                # elif event.key == K_TAB:
+                #     # Toggle between hero and map mode
+                #     if self._world.hero_actor is None:
+                #         self._world.select_hero_actor()
+                #         self.wheel_offset = HERO_DEFAULT_SCALE
+                #         self.control = carla.VehicleControl()
+                #         self._hud.notification('Hero Mode')
+                #     else:
+                #         self.wheel_offset = MAP_DEFAULT_SCALE
+                #         self.mouse_offset = [0, 0]
+                #         self.mouse_pos = [0, 0]
+                #         self._world.scale_offset = [0, 0]
+                #         self._world.hero_actor = None
+                #         self._hud.notification('Map Mode')
                 elif event.key == K_F1:
                     self._hud.show_info = not self._hud.show_info
                 elif event.key == K_i:
@@ -1632,6 +1640,7 @@ def game_loop(args):
             clock.tick_busy_loop(60)
 
             # Tick all modules
+            
             world.tick(clock)
             hud.tick(clock)
             input_control.tick(clock)

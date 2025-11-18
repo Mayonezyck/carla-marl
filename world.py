@@ -64,7 +64,7 @@ class CarlaWorld:
 
         # Restore original world settings
         self.world.apply_settings(self.original_settings)
-        self.tm.set_synchronous_mode(True)
+        self.tm.set_synchronous_mode(False)
 
 
 if __name__ == "__main__":
