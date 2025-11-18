@@ -19,5 +19,5 @@ class Free_Agents(Agent):
         if self.vehicle is not None:
             # Simple autopilot; if you want to use a Traffic Manager,
             # you can hook it up here with vehicle.set_autopilot(True, tm_port)
-            self.vehicle.set_autopilot(True)
+            self.vehicle.set_autopilot(True,8000)
             print(f"[Free_Agents] Enabled autopilot for free_agent_{self.index}")

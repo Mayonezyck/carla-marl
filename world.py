@@ -6,30 +6,34 @@ from manager import Manager
 
 class CarlaWorld:
     def __init__(self, config):
-        self.config = config
-
         world_host = config.get_host()
         world_port = config.get_port()
         self.client = carla.Client(world_host, world_port)
         self.client.set_timeout(10.0)
+        self.config = config
         self.world = self.client.get_world()
 
-        # Save original settings
+        # Save original settings for cleanup
         self.original_settings = self.world.get_settings()
 
-        # Enable synchronous mode
+        # --- Make world synchronous ---
         settings = self.world.get_settings()
         settings.synchronous_mode = True
-
-        # Fixed sim step from config (e.g. 0.05 sec)
-        self.fixed_dt = getattr(config, "get_fixed_delta_seconds", lambda: 0.05)()
-        settings.fixed_delta_seconds = self.fixed_dt
+        #settings.fixed_delta_seconds = config.get_fixed_delta_seconds()  # e.g. 0.05
         self.world.apply_settings(settings)
 
-        # Create manager
+        # --- Traffic Manager in sync mode ---
+        self.tm = self.client.get_trafficmanager(8000)  # or pass tm_port from config
+        self.tm.set_synchronous_mode(True)
+
+        # Manager spawns agents (free agents will use autopilot + TM)
         self.manager = Manager(config, self.world)
+        self.tick()
+        self.fixed_dt = config.get_fixed_delta_seconds()
 
-
+    def tick(self):
+        return self.world.tick()
+    
     def run(self):
         # Wall-clock pacing (can be same as fixed_dt)
         wall_dt = getattr(self.config, "get_wall_dt", lambda: self.fixed_dt)()
@@ -60,6 +64,7 @@ class CarlaWorld:
 
         # Restore original world settings
         self.world.apply_settings(self.original_settings)
+        self.tm.set_synchronous_mode(True)
 
 
 if __name__ == "__main__":
