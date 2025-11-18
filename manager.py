@@ -26,6 +26,7 @@ class Manager:
         self.agents: List[Any] = []               # all agents (controlled + free)
         self.active_flags: List[bool] = []        # active mask, same length as agents
         self.controlled_agents: List[Controlled_Agents] = []
+
         self.free_agents: List[Free_Agents] = []
         
 
@@ -181,7 +182,56 @@ class Manager:
         return frames, batch_obs
     
     # Compute reward and done for each controlled vehicle
+    def get_rewards_and_dones(self):
+        """
+        Compute rewards and done flags for each controlled agent.
 
+        Current logic:
+          - If agent collided this step:
+                reward = -10.0, done = True, agent is removed from world.
+          - If agent is already inactive (destroyed / no vehicle):
+                done = True, reward = 0.0
+          - Otherwise:
+                reward = 0.0, done = False
+
+        Returns
+        -------
+        rewards : np.ndarray, shape (num_controlled,)
+        dones   : np.ndarray, shape (num_controlled,)
+        """
+        num_ctrl = len(self.controlled_agents)
+        rewards = np.zeros(num_ctrl, dtype=np.float32)
+        dones = np.zeros(num_ctrl, dtype=bool)
+
+        for i, agent in enumerate(self.controlled_agents):
+            # Default: alive, zero reward
+            if agent is None or agent.vehicle is None:
+                # Agent has no vehicle → treat as already done
+                dones[i] = True
+                continue
+
+            # Map to global index to check active_flags
+            idx_all = self.vehicle_to_index.get(agent.vehicle.id, None)
+            if idx_all is None or not self.active_flags[idx_all]:
+                # Not active in global list → done
+                dones[i] = True
+                continue
+
+            # Collision-based termination
+            if agent.get_fatal_flag():
+                # Big negative reward on collision
+                rewards[i] = -10.0
+                dones[i] = True
+
+                # Clear its collision state and remove from world
+                self.remove_agent(agent)
+            else:
+                # Stay alive, zero reward for now
+                rewards[i] = 0.0
+                dones[i] = False
+        print(rewards)
+        print(dones)
+        return rewards, dones
 
 
     # --------------------------------------------------

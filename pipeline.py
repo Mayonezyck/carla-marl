@@ -21,7 +21,7 @@ if __name__ == "__main__":
             # 1) RL step: read obs, log transition, choose & apply new actions
             #print(f'Before rl step: {datetime.now().time()}')
             frames, obs, actions, rewards, dones = rl.step()
-
+            print(world.manager.active_flags)
             # 2) Advance the CARLA world one tick
             #print(f'After RL tick: {datetime.now().time()}')
             world.tick()

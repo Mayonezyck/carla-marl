@@ -216,7 +216,11 @@ class RLHandler:
             dones   : (N,)
         """
         num_agents = obs_t.shape[0]
+        print(num_agents)
         rewards = np.zeros(num_agents, dtype=np.float32)
         dones = np.zeros(num_agents, dtype=bool)
+        print('checking the rewards')
+        print('checking done')
+        rewards, dones = self.manager.get_rewards_and_dones()
 
         return rewards, dones
