@@ -71,6 +71,7 @@ class Agent:
                 start = self.starting_point
                 self.destination: carla.Location = self._pick_random_destination()
                 dest = self.destination
+                print(dest)
                 bp.set_attribute("role_name", f"{self.role_prefix}_{self.index}|{start.x:.2f},{start.y:.2f},{start.z:.2f}|{dest.x:.2f},{dest.y:.2f},{dest.z:.2f}")
             else:
                 bp.set_attribute("role_name", f"{self.role_prefix}_{self.index}")

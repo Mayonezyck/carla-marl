@@ -26,10 +26,45 @@ class Controlled_Agents(Agent):
         # Destination = random valid driving waypoint in the world
         self._lidar_queue: "queue.Queue[tuple[int, carla.LidarMeasurement]]" = queue.Queue()
         self._last_lidar: tuple[int, carla.LidarMeasurement] | None = None
-
+        self._collision_event = [] #I use a list to record the events, should I just cache one?
+        self._add_other_sensors()
         self._setup_sensors_from_config()
-
         
+        
+
+    def _add_other_sensors(self):
+        collision_sensor = self._add_collision_sensor()
+
+        def collision_callback(event: carla.CollisionEvent):
+            actor_we_collided_with = event.other_actor
+            impulse = event.normal_impulse  # carla.Vector3D
+            intensity = (impulse.x**2 + impulse.y**2 + impulse.z**2)**0.5
+            self._collision_event.append(event)
+            print(f"[COLLISION] with {actor_we_collided_with.type_id}, intensity={intensity:.2f}")
+
+        collision_sensor.listen(collision_callback)
+        self.sensors.append(collision_sensor)
+        
+    def _add_collision_sensor(self) -> None:
+        blueprint_library = self.world.get_blueprint_library()
+        collision_bp = blueprint_library.find('sensor.other.collision')
+
+        # You can set attributes on the sensor if needed
+        # e.g. collision_bp.set_attribute('some_attribute', 'value')
+
+        # Attach the sensor to the parent (e.g., vehicle)
+        transform = carla.Transform(
+            carla.Location(x=0.0, y=0.0, z=2.0),  # place it somewhere on the car
+            carla.Rotation()
+        )
+
+        collision_sensor = self.world.spawn_actor(
+            collision_bp,
+            transform,
+            attach_to=self.vehicle
+        )
+        return collision_sensor
+            
 
     def _setup_sensors_from_config(self) -> None:
         sensors_cfg = self.config.get_sensor_type()

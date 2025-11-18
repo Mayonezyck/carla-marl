@@ -19,11 +19,11 @@ if __name__ == "__main__":
     try:
         while True:
             # 1) RL step: read obs, log transition, choose & apply new actions
-            print(f'Before rl step: {datetime.now().time()}')
+            #print(f'Before rl step: {datetime.now().time()}')
             frames, obs, actions, rewards, dones = rl.step()
 
             # 2) Advance the CARLA world one tick
-            print(f'After RL tick: {datetime.now().time()}')
+            #print(f'After RL tick: {datetime.now().time()}')
             world.tick()
 
     except KeyboardInterrupt:

@@ -145,7 +145,7 @@ class Manager:
             if agent is None or agent.vehicle is None:
                 continue
             try:
-                print(f'now applying {act} to {agent}')
+                #print(f'now applying {act} to {agent}')
                 agent.apply_action(act)
             except Exception as e:
                 print("[Manager] Error applying action to agent {}: {}".format(agent.index, e))
@@ -179,6 +179,9 @@ class Manager:
 
         batch_obs = np.stack(obs_list, axis=0)
         return frames, batch_obs
+    
+    # Compute reward and done for each controlled vehicle
+
 
 
     # --------------------------------------------------
@@ -242,6 +245,7 @@ class Manager:
         vehicle = getattr(agent, "vehicle", None)
         if vehicle is not None:
             self.remove_vehicle(vehicle)
+
 
 
 
