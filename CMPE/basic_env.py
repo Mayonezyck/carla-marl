@@ -14,7 +14,7 @@ except IndexError:
     print("Could not find CARLA egg, please check CARLA_ROOT.")
     sys.exit(1)
 
-import carla
+
 from agents.navigation.global_route_planner import GlobalRoutePlanner
 #from agents.navigation.global_route_planner_dao import GlobalRoutePlannerDAO
 # from agents.navigation.global_route_planner import (

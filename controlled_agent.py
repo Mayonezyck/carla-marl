@@ -1,8 +1,21 @@
-import carla
+import carla, os, sys,glob
 from customAgents import Agent
 import random
 from typing import Dict, Any, List, Optional
 import queue
+CARLA_ROOT = os.environ.get("CARLA_ROOT", "/home/zb536/Carla-9.15")
+try:
+    egg_pattern = os.path.join(
+        CARLA_ROOT, "PythonAPI", "carla", "dist", "carla-*py3*.egg"
+    )
+    sys.path.append(glob.glob(egg_pattern)[0])
+    sys.path.append(os.path.join(CARLA_ROOT, "PythonAPI", "carla"))
+    sys.path.append(os.path.join(CARLA_ROOT, "PythonAPI"))
+except IndexError:
+    print("Could not find CARLA egg, please check CARLA_ROOT.")
+    sys.exit(1)
+
+from agents.navigation.global_route_planner import GlobalRoutePlanner
 
 
 class Controlled_Agents(Agent):
