@@ -22,6 +22,8 @@ if __name__ == "__main__":
             #print(f'Before rl step: {datetime.now().time()}')
             frames, obs, actions, rewards, dones = rl.step()
             print(world.manager.active_flags)
+            if config.get_if_route_planning():
+                world.manager.visualize_path()
             # 2) Advance the CARLA world one tick
             #print(f'After RL tick: {datetime.now().time()}')
             world.tick()

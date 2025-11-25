@@ -226,7 +226,8 @@ class Agent:
             except Exception:
                 pass
         self.sensors.clear()
-
+        if hasattr(self, "_clear_route_debug"):
+            self._clear_route_debug()
         if self.vehicle is not None:
             try:
                 self.vehicle.destroy()

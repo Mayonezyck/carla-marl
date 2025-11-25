@@ -155,6 +155,8 @@ class RLHandler:
         # 4) Apply actions via Manager
         self.manager.apply_actions_to_controlled(actions_t)
 
+        
+
         # 5) Cache for next step
         self.last_obs = obs_t
         self.last_actions = actions_t

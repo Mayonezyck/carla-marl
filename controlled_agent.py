@@ -35,12 +35,29 @@ class Controlled_Agents(Agent):
         # self.starting_point: carla.Location = (
         #     self.vehicle.get_transform().location if self.vehicle is not None else None
         # )
+        self._route_planner: GlobalRoutePlanner | None = None
+        self.current_waypoint_plan: list[tuple[carla.Waypoint, Any]] = []
+        self._route_debug_enabled: bool = False
 
         # Destination = random valid driving waypoint in the world
         self._lidar_queue: "queue.Queue[tuple[int, carla.LidarMeasurement]]" = queue.Queue()
         self._last_lidar: tuple[int, carla.LidarMeasurement] | None = None
         self._collision_event = [] #I use a list to record the events, should I just cache one?
         self._fatal_collision = False #Currently this will log any collision as fatal, later can be tweeked to check only significant events (e.g. collision with vehicle/ped)
+        # Initialize start/end and plan a route
+        if self.config.get_if_route_planning() and self.vehicle is not None:
+
+            # Build planner once per agent
+            self._route_planner = GlobalRoutePlanner(self.world.get_map(), 10.0)
+
+            # Compute the route between start and end
+            if self.starting_point is not None and self.destination is not None:
+                self.current_waypoint_plan = self._route_planner.trace_route(
+                    self.starting_point,
+                    self.destination
+                )
+                self._route_debug_enabled = True
+        
         self._add_other_sensors()
         self._setup_sensors_from_config()
         
@@ -152,3 +169,52 @@ class Controlled_Agents(Agent):
         # camera_cfg = sensors_cfg.get("camera", {})
         # if camera_cfg.get("enabled", False):
         #     self._spawn_camera(camera_cfg, name_suffix="main")
+
+    def draw_current_route_debug(self, life_time: float = 0.2) -> None:
+        """
+        Draw the current waypoint plan as:
+          - Blue points at each waypoint
+          - Green lines between consecutive waypoints
+        Call this every tick from the Manager.
+        """
+        if not self.current_waypoint_plan:
+            return
+
+        dbg = self.world.debug
+
+        # Draw points
+        for wp, _ in self.current_waypoint_plan:
+            loc = wp.transform.location
+            loc.z += 0.3   # lift slightly above road so it's not z-fighting
+            dbg.draw_point(
+                loc,
+                size=0.1,
+                color=carla.Color(0, 0, 255),  # blue points
+                life_time=life_time,
+            )
+
+        # Draw lines
+        for (wp1, _), (wp2, _) in zip(
+            self.current_waypoint_plan[:-1], self.current_waypoint_plan[1:]
+        ):
+            loc1 = wp1.transform.location
+            loc2 = wp2.transform.location
+            loc1.z += 0.3
+            loc2.z += 0.3
+            dbg.draw_line(
+                loc1,
+                loc2,
+                thickness=0.1,
+                color=carla.Color(0, 255, 0),  # green line
+                life_time=life_time,
+            )
+
+
+    def _clear_route_debug(self) -> None:
+        """
+        Stop drawing the route and drop the plan.
+        Debug shapes in CARLA are time-limited, so once we stop redrawing
+        and the lifetime expires, the visualization is effectively 'cleaned'.
+        """
+        self._route_debug_enabled = False
+        self.current_waypoint_plan = []

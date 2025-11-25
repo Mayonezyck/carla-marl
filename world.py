@@ -44,6 +44,7 @@ class CarlaWorld:
                 print('tick')
 
                 _, batch_obs=self.manager.get_controlled_lidar_observations()
+                self.manager.visualize_path()
                 print("batch_obs shape:", batch_obs.shape)
                 snapshot = self.world.tick()
                 if hasattr(self.manager, "tick"):

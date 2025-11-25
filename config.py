@@ -13,13 +13,14 @@ class ConfigLoader():
             self.port = cfg["carla"]["port"]
             self.ped_count = cfg["other"]["pedestrian_count"]
             self.controlled_count = cfg["experiment"]["controlled_count"]
+            self.if_route_planning = cfg["experiment"]["route_planning_enable"]
             self.sensorless_free_agent = cfg["experiment"]["sensorless_free_agent"]
             self.free_count = cfg["experiment"]["free_count"]
             self.spawn_max_attempts = cfg["experiment"]["spawn_max_attempts"]
             self.sensor_type = cfg["experiment"]["sensor_type"]
             self.lidar_tf = [cfg["experiment"]['lidar']['x'],cfg["experiment"]['lidar']['y'],cfg["experiment"]['lidar']['z'],cfg["experiment"]['lidar']['roll'],cfg["experiment"]['lidar']['pitch'],cfg["experiment"]['lidar']['yaw']]
             self.delta_seconds = cfg["debug"]["delta_seconds"]
-
+            
         except FileNotFoundError:
             print(f'File {config_path} Not Found')
     
@@ -30,6 +31,8 @@ class ConfigLoader():
         return self.port
     def get_controlled_count(self):
         return self.controlled_count
+    def get_if_route_planning(self):
+        return self.if_route_planning
     def get_free_count(self):
         return self.free_count
     def get_headcounts(self):

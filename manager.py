@@ -36,7 +36,6 @@ class Manager:
 
         # Read counts from config
         nc, nf = config.get_headcounts()
-
         # Spawn everything
         self.spawn_both_controlled_and_free(nc, nf)
 
@@ -244,6 +243,11 @@ class Manager:
         print(dones)
         return rewards, dones
 
+    # Visualize Path for each controlled
+    def visualize_path(self):
+        for agent in self.controlled_agents:
+            print('drawing drawing')
+            agent.draw_current_route_debug()
 
     # --------------------------------------------------
     # Cleanup & removal
@@ -291,7 +295,7 @@ class Manager:
             agent.destroy_agent()
         except Exception as e:
             print(f"[Manager] Error destroying agent {idx}: {e}")
-
+        
         self.active_flags[idx] = False
         # Remove from vehicle lookup map
         self.vehicle_to_index.pop(vehicle.id, None)
