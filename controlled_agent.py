@@ -1,5 +1,5 @@
 import carla
-from agents import Agent
+from customAgents import Agent
 import random
 from typing import Dict, Any, List, Optional
 import queue

@@ -26,7 +26,7 @@ class Manager:
         self.agents: List[Any] = []               # all agents (controlled + free)
         self.active_flags: List[bool] = []        # active mask, same length as agents
         self.controlled_agents: List[Controlled_Agents] = []
-
+        self.sensorlessFreeAgent = self.config.get_if_free_agent_sensorless()
         self.free_agents: List[Free_Agents] = []
         
 
@@ -62,7 +62,18 @@ class Manager:
         # Spawn free agents
         for i in range(nf):
             try:
-                agent = Free_Agents(self.world, i, self.config)
+                if self.sensorlessFreeAgent:
+                    agent = Free_Agents(self.world, i, self.config) #clean agents
+                else:
+                    agent_output_dir = f"output/free_agent_{i}"
+                    agent = Free_Agents(
+                        self.world,
+                        index=i,
+                        config=self.config,
+                        with_sensors=True,
+                        output_dir=agent_output_dir,
+                    )
+
             except Exception as e:
                 print(f"[Manager] Failed to spawn free agent {i}: {e}")
                 raise

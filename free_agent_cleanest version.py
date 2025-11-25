@@ -1,4 +1,4 @@
-from agents import Agent
+from customAgents import Agent
 from typing import Dict, Any, List, Optional
 import carla
 

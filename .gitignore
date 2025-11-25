@@ -9,6 +9,10 @@ __pycache__/
 # vscode
 .vscode/
 
+# dataset
+output*/
+output_*
+
 # Distribution / packaging
 .Python
 build/

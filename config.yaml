@@ -2,10 +2,14 @@ carla:
   host: "localhost"
   port: 2000
 
+other:
+  pedestrian_count: 0
+
 experiment:
-  controlled_count: 2
-  free_count: 10
-  spawn_max_attempts: 10
+  controlled_count: 0
+  sensorless_free_agent: True
+  free_count: 20
+  spawn_max_attempts: 100
   sensor_type: "lidar"
   lidar:
     x: 0.0
