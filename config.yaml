@@ -3,13 +3,13 @@ carla:
   port: 2000
 
 other:
-  pedestrian_count: 0
+  pedestrian_count: 50
 
 experiment:
-  controlled_count: 2
+  controlled_count: 0
   route_planning_enable: True
-  sensorless_free_agent: True
-  free_count: 0
+  sensorless_free_agent: False #False 
+  free_count: 50
   spawn_max_attempts: 100
   sensor_type: "lidar"
   lidar:

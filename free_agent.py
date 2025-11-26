@@ -73,6 +73,7 @@ class Free_Agents(Agent):
         self.seg_dir = os.path.join(base, "seg")
         self.seg_raw_dir = os.path.join(base, "seg_raw")
         self.depth_dir = os.path.join(base, "depth")
+        self.depth_raw_dir = os.path.join(base, "depth_raw")
 
         for d in [self.rgb_dir, self.seg_dir, self.seg_raw_dir, self.depth_dir]:
             os.makedirs(d, exist_ok=True)
@@ -153,7 +154,9 @@ class Free_Agents(Agent):
             return
         filename = self._make_filename(image)
         path = os.path.join(self.depth_dir, filename)
+        path_raw = os.path.join(self.depth_raw_dir, filename)
         image.save_to_disk(path, carla.ColorConverter.LogarithmicDepth)
+        image.save_to_disk(path_raw, carla.ColorConverter.Raw)
 
     # ========= CLEANUP =========
 
