@@ -3,6 +3,8 @@
 import numpy as np
 from typing import Optional, Callable, Any, Sequence, List, Dict
 import torch
+STEER_BINS = np.linspace(-np.pi, np.pi, 13)   # 13 values
+ACCEL_BINS = np.array([-4.0, -2.6, -1.3, 0.0, 1.3, 2.6, 4.0])  # 7 values
 
 class SimpleReplayBuffer:
     """
@@ -87,6 +89,7 @@ class RLHandler:
         self.last_actions = None   # type: Optional[np.ndarray]   # (N, action_dim)
 
         self.step_count: int = 0
+        self.debug_history = [] 
 
     # --------------------------------------------------
     # Public API
@@ -111,10 +114,8 @@ class RLHandler:
             dones    : np.ndarray, shape (N,) or None on the very first call
         """
         # 1) Get current obs from all controlled agents (GPUDrive-style)
-        print('trying to get the obs')
         obs_t = self._get_gpudrive_obs_from_manager()  # (num_agents, obs_dim)
 
-        print(obs_t)
         rewards = None
         dones = None
 
@@ -136,7 +137,10 @@ class RLHandler:
 
         # 3) Compute new actions from current obs
         if self.policy is not None:
-            actions_t = self.policy(obs_t)
+            # GPUDrive returns discrete values; decode here
+            discrete_actions = self.policy(obs_t)       # shape (N,) or scalar
+            actions_t = self.decode_discrete_action(discrete_actions)
+
         else:
             actions_t = self._default_policy(obs_t)
 
@@ -151,6 +155,27 @@ class RLHandler:
                     self.action_dim, actions_t.shape
                 )
             )
+
+        # >>> DEBUG LOGGING: focus on first controlled agent (index 0) <<<
+        if len(self.manager.controlled_agents) > 0:
+            ego_agent = self.manager.controlled_agents[0]
+            if ego_agent is not None and getattr(ego_agent, "vehicle", None) is not None:
+                ego_raw = self.manager.get_agent_ego_raw_for_logging(
+                    ego_agent,
+                    ego_agent.destination,
+                )  # shape (6,)
+
+                # Discrete action for agent 0
+                disc_a0 = float(disc_np[0]) if disc_np.size > 0 else np.nan
+
+                self.debug_history.append({
+                    "step": self.step_count,
+                    "ego_raw": ego_raw,                      # (6,)
+                    "disc_action": disc_a0,                  # scalar
+                    "throttle": float(actions_t[0, 0]),
+                    "steer": float(actions_t[0, 1]),
+                    "brake": float(actions_t[0, 2]),
+                })
 
         # 4) Apply actions via Manager
         self.manager.apply_actions_to_controlled(actions_t)
@@ -200,7 +225,42 @@ class RLHandler:
         obs_batch = np.stack(obs_list, axis=0)  # (N, obs_dim)
         return obs_batch
 
+    
+    def decode_discrete_action(self, discrete_action: np.ndarray) -> np.ndarray:
+        """
+        Converts discrete GPUDrive action(s) into CARLA continuous control:
+            throttle, steer, brake
 
+        discrete_action: shape () for 1 agent or (N,)
+        returns: (N, 3)
+        """
+        act = np.asarray(discrete_action)
+
+        # Case 1: scalar → convert to (1,)
+        if act.ndim == 0:
+            act = np.array([act.item()], dtype=np.int64)
+
+        # Shape (N,)
+        N = act.shape[0]
+
+        # Steering index: integer in [0, 12]
+        steer_idx = int(act // len(ACCEL_BINS))
+
+        # Acceleration index: integer in [0, 6]
+        accel_idx = int(act % len(ACCEL_BINS))
+
+        # Map to actual continuous values
+        steer = STEER_BINS[steer_idx]              # radians
+        accel = ACCEL_BINS[accel_idx]              # m/s^2 roughly
+
+        # Convert accel → throttle/brake
+        throttle = np.clip(accel, 0, None) / 4.0   # scale 0..4 → 0..1
+        brake    = np.clip(-accel, 0, None) / 4.0  # scale -4..0 → 0..1
+
+        # Normalize steering from [-pi, pi] to [-1, 1]
+        steer_norm = steer / np.pi
+
+        return np.stack([throttle, steer_norm, brake], axis=-1).astype(np.float32)
 
     # --------------------------------------------------
     # Internals

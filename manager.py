@@ -492,6 +492,49 @@ class Manager:
         if vehicle is not None:
             self.remove_vehicle(vehicle)
 
+    # DEBUGGING
+    def get_agent_ego_raw_for_logging(
+        self,
+        agent,
+        goal_location: carla.Location,
+    ):
+        """
+        Same as get_agent_ego_obs but returns RAW (unnormalized) values:
+            [speed, veh_len, veh_width, rel_x, rel_y, collided_flag]
+        for debugging & visualization.
+        """
+        vehicle = agent.vehicle
+        if vehicle is None:
+            return np.zeros(6, dtype=np.float32)
 
+        # --- speed (m/s) ---
+        vel = vehicle.get_velocity()
+        speed = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
+
+        # --- vehicle size (full length / width) ---
+        bbox = vehicle.bounding_box
+        veh_len = 2.0 * float(bbox.extent.x)
+        veh_width = 2.0 * float(bbox.extent.y)
+
+        # --- relative goal in ego frame (raw meters) ---
+        tf = vehicle.get_transform()
+        ego_loc = tf.location
+        ego_yaw_rad = math.radians(tf.rotation.yaw)
+
+        dx = float(goal_location.x) - float(ego_loc.x)
+        dy = float(goal_location.y) - float(ego_loc.y)
+
+        cos_e = math.cos(ego_yaw_rad)
+        sin_e = math.sin(ego_yaw_rad)
+
+        rel_x = cos_e * dx + sin_e * dy
+        rel_y = -sin_e * dx + cos_e * dy
+
+        collided = 1.0 if agent.get_fatal_flag() else 0.0
+
+        return np.array(
+            [speed, veh_len, veh_width, rel_x, rel_y, collided],
+            dtype=np.float32,
+        )
 
 

@@ -2,6 +2,7 @@ import random
 from typing import Dict, Any, List, Optional
 
 import carla
+import math
 import yaml
 
 class Agent:
@@ -64,12 +65,17 @@ class Agent:
 
             # Role name for debugging & filtering
             
-
-            spawn_point = spawn_points[attempts % len(spawn_points)]
+            spawn_point = self.find_closest_spawn(spawn_points) #FOR EASE of OBSERVATION I USE THIS SPAWN FINDING 
+            #spawn_point = spawn_points[attempts % len(spawn_points)]
             self.starting_point = spawn_point.location
             if self.role_prefix == "controlled_agent":
                 start = self.starting_point
-                self.destination: carla.Location = self._pick_random_destination()
+                self.destination = self._pick_nearby_destination(
+                    world=self.world,
+                    start_location=self.starting_point,
+                    min_distance=50.0,   # or whatever you want
+                    step=2.0,
+                )
                 dest = self.destination
                 print(dest)
                 bp.set_attribute("role_name", f"{self.role_prefix}_{self.index}|{start.x:.2f},{start.y:.2f},{start.z:.2f}|{dest.x:.2f},{dest.y:.2f},{dest.z:.2f}")
@@ -190,6 +196,85 @@ class Agent:
             return random.choice(driving_wps).transform.location
         else:
             return random.choice(driving_wps).transform.location
+
+    def _pick_nearby_destination(
+        self,
+        world: carla.World,
+        start_location: carla.Location,
+        min_distance: float = 50.0,
+        step: float = 2.0,
+        max_steps: int = 200,
+    ) -> carla.Location:
+        """
+        Starting from start_location, walk along the lane using waypoint.next(step)
+        until we are at least `min_distance` meters away (or we run out of road).
+
+        Returns a carla.Location for the destination.
+        """
+        carla_map = world.get_map()
+        # Get closest driving waypoint to the start
+        wp = carla_map.get_waypoint(
+            start_location,
+            project_to_road=True,
+            lane_type=carla.LaneType.Driving,
+        )
+
+        start = wp.transform.location
+        total_dist = 0.0
+        current_wp = wp
+
+        for _ in range(max_steps):
+            next_wps = current_wp.next(step)
+            if not next_wps:
+                # Reached end of lane; stop here
+                break
+
+            # You can randomize branch choice if there are multiple:
+            current_wp = random.choice(next_wps)
+            loc = current_wp.transform.location
+            seg = math.sqrt(
+                (loc.x - start.x) ** 2 +
+                (loc.y - start.y) ** 2 +
+                (loc.z - start.z) ** 2
+            )
+            total_dist = seg
+
+            if total_dist >= min_distance:
+                # Good enough, stop here
+                return loc
+
+        # Fallback: if we never reached min_distance, just return
+        # the last waypoint location we got
+        return current_wp.transform.location
+
+    def find_closest_spawn(self, spawn_points,
+                        target_xyz=( -100.0, 56.0, 0 )):
+        """
+        Returns the spawn point whose location is closest to target_xyz.
+        """
+        target_x, target_y, target_z = target_xyz
+        target_loc = carla.Location(target_x, target_y, target_z)
+
+        if not spawn_points:
+            raise RuntimeError("No spawn points available in this map.")
+
+        closest_sp = None
+        closest_dist = float("inf")
+
+        for sp in spawn_points:
+            loc = sp.location
+            dx = loc.x - target_loc.x
+            dy = loc.y - target_loc.y
+            dz = loc.z - target_loc.z
+            dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+
+            if dist < closest_dist:
+                closest_dist = dist
+                closest_sp = sp
+
+        print(f"[Closest Spawn] Distance = {closest_dist:.2f} m")
+        return closest_sp
+
 
     # Default callbacks: you can override or extend in subclasses if needed
     def lidar_callback(self, data: carla.LidarMeasurement, tag: str) -> None:

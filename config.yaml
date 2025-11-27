@@ -14,7 +14,7 @@ experiment:
   controlled_count: 1
   route_planning_enable: True
   sensorless_free_agent: True #False for CMPE assignment data collections
-  free_count: 10
+  free_count: 0
   spawn_max_attempts: 100
   sensor_type: "lidar"
   lidar:

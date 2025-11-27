@@ -7,13 +7,15 @@ from client import carlaClient
 from config import ConfigLoader
 from world import CarlaWorld
 from RL_handler import RLHandler
+from remote_policy import RemoteSimPolicy 
 
 if __name__ == "__main__": 
     #Starting Carla Client
     config = ConfigLoader()
     client = carlaClient()
     world = CarlaWorld(config)
-    rl = RLHandler(world.manager)
+    policy = RemoteSimPolicy(base_url="http://0.0.0.0:7999")
+    rl = RLHandler(world.manager, policy=policy)
 
     from datetime import datetime
     t = 0 
