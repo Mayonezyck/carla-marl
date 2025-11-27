@@ -1,12 +1,30 @@
 from config import ConfigLoader
 from controlled_agent import Controlled_Agents
 from free_agent import Free_Agents  # adjust import path as needed
+from road_points import RoadPointExtractor
 
-import random
+import math
 import numpy as np
 import carla
+import torch
 from typing import List, Dict, Any, Optional, Tuple, Sequence
 import queue
+
+
+# These should match your constants module
+MAX_SPEED = 100.0
+MAX_VEH_LEN = 30.0
+MAX_VEH_WIDTH = 15.0
+MIN_REL_GOAL_COORD = -1000.0
+MAX_REL_GOAL_COORD = 1000.0
+
+
+def normalize_min_max_np(x: float, min_val: float, max_val: float) -> float:
+    """GPUDrive-style [-1, 1] normalization."""
+    rng = max_val - min_val
+    if rng <= 0:
+        return 0.0
+    return float(2.0 * (x - min_val) / rng - 1.0)
 
 
 class Manager:
@@ -21,6 +39,12 @@ class Manager:
         """
         self.config = config
         self.world = world
+        carla_map = world.get_map()
+        step_size = self.config.get_step_size()
+        self.search_radius = self.config.get_search_radius()
+        self.search_n_points = config.get_search_n_points()
+        self.road_extractor = RoadPointExtractor(carla_map, step=step_size, observation_radius=self.search_radius)
+
 
         # Agent containers
         self.agents: List[Any] = []               # all agents (controlled + free)
@@ -138,6 +162,163 @@ class Manager:
 
         return obs.astype(np.float32)
     
+    def get_agent_roadgraph_obs(self, agent) -> torch.Tensor:
+        """
+        Build a (200, 13) GPUDrive-style roadgraph obs for this agent,
+        in the agent's local frame.
+        """
+        vehicle = agent.vehicle  # or however you store the carla.Actor
+        transform = vehicle.get_transform()
+        ego_loc = transform.location
+        ego_yaw_deg = transform.rotation.yaw
+
+        points9 = self.road_extractor.get_local_points_from_precomputed_knearest(
+            self.road_extractor.driving_wps,
+            ego_loc,
+            radius=self.search_radius,
+            n_points=self.search_n_points,
+            step=self.road_extractor.step,
+            all_landmarks=self.road_extractor.all_landmarks,
+            all_crosswalks=self.road_extractor.all_crosswalks,
+        )
+
+        rg_np = self.road_extractor.carla_points_to_gpudrive_roadgraph(
+            points9,
+            ego_location=ego_loc,
+            ego_yaw_deg=ego_yaw_deg,
+        )
+
+        rg_tensor = torch.from_numpy(rg_np).float()
+        return rg_tensor  # shape (N, 13)
+    
+    def get_agent_ego_obs(
+        self,
+        agent,
+        goal_location: carla.Location,
+    ) -> torch.Tensor:
+        """
+        Build a normalized ego feature vector for one agent:
+
+            [speed_norm,
+             veh_len_norm,
+             veh_width_norm,
+             rel_goal_x_norm,
+             rel_goal_y_norm,
+             collision_flag]
+
+        - speed is |v| in m/s, divided by MAX_SPEED
+        - length / width are from CARLA bounding box extents (full size), normalized
+        - rel_goal_{x,y} are in the *ego frame* then mapped to [-1, 1]
+          using MIN_REL_GOAL_COORD / MAX_REL_GOAL_COORD
+        - collision_flag is 0.0 or 1.0 (no normalization)
+        """
+        vehicle = agent.vehicle
+        if vehicle is None:
+            # dead agent → return zeros
+            return torch.zeros(6, dtype=torch.float32)
+
+        # --- speed (m/s) ---
+        vel = vehicle.get_velocity()
+        speed = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
+        speed_norm = speed / MAX_SPEED
+
+        # --- vehicle size (full length / width) ---
+        bbox = vehicle.bounding_box
+        # CARLA extents are half-dimensions
+        veh_len = 2.0 * float(bbox.extent.x)
+        veh_width = 2.0 * float(bbox.extent.y)
+
+        veh_len_norm = veh_len / MAX_VEH_LEN
+        veh_width_norm = veh_width / MAX_VEH_WIDTH
+
+        # --- relative goal in ego frame ---
+        tf = vehicle.get_transform()
+        ego_loc = tf.location
+        ego_yaw_rad = math.radians(tf.rotation.yaw)
+
+        # world diff
+        dx = float(goal_location.x) - float(ego_loc.x)
+        dy = float(goal_location.y) - float(ego_loc.y)
+
+        cos_e = math.cos(ego_yaw_rad)
+        sin_e = math.sin(ego_yaw_rad)
+
+        # rotate into ego frame (x forward, y left)
+        rel_x = cos_e * dx + sin_e * dy
+        rel_y = -sin_e * dx + cos_e * dy
+
+        rel_goal_x_norm = normalize_min_max_np(
+            rel_x, MIN_REL_GOAL_COORD, MAX_REL_GOAL_COORD
+        )
+        rel_goal_y_norm = normalize_min_max_np(
+            rel_y, MIN_REL_GOAL_COORD, MAX_REL_GOAL_COORD
+        )
+
+        # --- collision flag ---
+        # reuse your existing logic; swap to whatever flag you like
+        collided = 1.0 if agent.get_fatal_flag() else 0.0
+
+        ego_vec = torch.tensor(
+            [
+                speed_norm,
+                veh_len_norm,
+                veh_width_norm,
+                rel_goal_x_norm,
+                rel_goal_y_norm,
+                collided,
+            ],
+            dtype=torch.float32,
+        )
+        return ego_vec
+    
+    def get_neighbor_obs(self, agent) -> torch.Tensor:
+        """
+        Placeholder partner/neighbor observation.
+
+        For now we mimic 'no neighbors' by returning a fixed-size
+        zero vector of length 378, matching GPUDrive's partner feature size.
+        """
+        return torch.zeros(378, dtype=torch.float32)
+    
+
+    def get_gpudrive_style_obs(
+        self,
+        agent,
+        goal_location: carla.Location,
+    ) -> torch.Tensor:
+        """
+        Build a single flattened observation vector for one agent in
+        'GPUDrive style':
+
+            ego_obs:        (6,)
+            neighbor_obs:   (378,)   # currently all zeros
+            roadgraph_obs:  (N, 13)  # N ~ 200 → (2600,)
+
+        Concatenated into a 1D tensor of length 2984:
+
+            6 + 378 + (N * 13) == 2984  (assuming N == 200)
+        """
+        # 1) Ego (normalized)
+        ego_vec = self.get_agent_ego_obs(agent, goal_location)       # (6,)
+
+        # 2) Neighbors (placeholder)
+        neighbor_vec = self.get_neighbor_obs(agent)                  # (378,)
+
+        # 3) Roadgraph (normalized, local frame)
+        rg_tensor = self.get_agent_roadgraph_obs(agent)              # (N, 13)
+        rg_flat = rg_tensor.reshape(-1)                              # (N*13,)
+
+        obs = torch.cat([ego_vec, neighbor_vec, rg_flat], dim=0)
+
+        # Safety check: for N=200 this should be 2984 = 6 + 378 + 200*13
+        expected_len = 6 + 378 + self.search_n_points * 13
+        assert obs.shape[0] == expected_len, (
+            f"Got obs len {obs.shape[0]}, expected {expected_len}. "
+            f"(search_n_points={self.search_n_points})"
+        )
+
+        return obs
+
     def apply_actions_to_controlled(self, actions: Sequence[Sequence[float]]) -> None:
         """
         Apply actions to all controlled agents.

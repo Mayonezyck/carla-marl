@@ -2,7 +2,7 @@
 
 import numpy as np
 from typing import Optional, Callable, Any, Sequence, List, Dict
-
+import torch
 
 class SimpleReplayBuffer:
     """
@@ -97,7 +97,7 @@ class RLHandler:
         """
         One RL step:
 
-        1. Read current observations from Manager.
+        1. Read current GPUDrive-style observations from Manager.
         2. If we have (last_obs, last_actions), build and store
            the transition (last_obs, last_actions, reward, obs_t, done).
         3. Compute new actions from obs_t via policy.
@@ -105,16 +105,16 @@ class RLHandler:
         5. Cache (obs_t, actions_t) for the next call.
 
         Returns:
-            frames_t : list of frame ids (or None) for each controlled agent
-            obs_t    : np.ndarray, shape (N, num_points, 3)
+            obs_t    : np.ndarray, shape (N, obs_dim)    # e.g. 2984
             actions_t: np.ndarray, shape (N, action_dim)
             rewards  : np.ndarray, shape (N,) or None on the very first call
             dones    : np.ndarray, shape (N,) or None on the very first call
         """
-        # 1) Get current obs from all controlled agents
-        frames_t, obs_t = self.manager.get_controlled_lidar_observations()
-        # obs_t: (num_agents, num_points, 3)
+        # 1) Get current obs from all controlled agents (GPUDrive-style)
+        print('trying to get the obs')
+        obs_t = self._get_gpudrive_obs_from_manager()  # (num_agents, obs_dim)
 
+        print(obs_t)
         rewards = None
         dones = None
 
@@ -155,14 +155,52 @@ class RLHandler:
         # 4) Apply actions via Manager
         self.manager.apply_actions_to_controlled(actions_t)
 
-        
+
 
         # 5) Cache for next step
         self.last_obs = obs_t
         self.last_actions = actions_t
         self.step_count += 1
 
-        return frames_t, obs_t, actions_t, rewards, dones
+        return obs_t, actions_t, rewards, dones
+
+    def _get_gpudrive_obs_from_manager(self) -> np.ndarray:
+        """
+        Build a batch of GPUDrive-style obs for all controlled agents.
+
+        Assumes your Manager has:
+            get_gpudrive_style_obs(agent) -> torch.Tensor or np.ndarray
+        that returns a (2984,) vector per agent (ego + neighbors + roadgraph).
+        """
+        obs_list = []
+
+        for agent in self.manager.controlled_agents:
+            # If agent is dead / missing vehicle → just zero obs
+            if agent is None or getattr(agent, "vehicle", None) is None:
+                obs_vec = np.zeros(2984, dtype=np.float32)  # adjust if obs_dim changes
+                obs_list.append(obs_vec)
+                continue
+
+            obs = self.manager.get_gpudrive_style_obs(agent, agent.destination)
+            # Handle torch or numpy
+            try:
+                import torch
+                if isinstance(obs, torch.Tensor):
+                    obs_vec = obs.detach().cpu().numpy()
+                else:
+                    obs_vec = np.asarray(obs, dtype=np.float32)
+            except ImportError:
+                obs_vec = np.asarray(obs, dtype=np.float32)
+
+            obs_list.append(obs_vec)
+
+        if len(obs_list) == 0:
+            return np.zeros((0, 2984), dtype=np.float32)
+
+        obs_batch = np.stack(obs_list, axis=0)  # (N, obs_dim)
+        return obs_batch
+
+
 
     # --------------------------------------------------
     # Internals
@@ -209,9 +247,10 @@ class RLHandler:
             - off-road penalties, etc.
 
         Shapes:
-            obs_t   : (N, P, 3)
+            obs_t   : (N, obs_dim)      # GPUDrive-style flat obs
             actions_t: (N, action_dim)
-            obs_tp1 : (N, P, 3)
+            obs_tp1 : (N, obs_dim)
+
 
         Returns:
             rewards : (N,)

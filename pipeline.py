@@ -11,29 +11,34 @@ from RL_handler import RLHandler
 if __name__ == "__main__": 
     #Starting Carla Client
     config = ConfigLoader()
-    client = carlaClient() #assess if the class is needed
+    client = carlaClient()
     world = CarlaWorld(config)
     rl = RLHandler(world.manager)
+
     from datetime import datetime
+    t = 0 
+    import traceback
 
     try:
         while True:
-            # 1) RL step: read obs, log transition, choose & apply new actions
-            #print(f'Before rl step: {datetime.now().time()}')
-            frames, obs, actions, rewards, dones = rl.step()
-            print(world.manager.active_flags)
-            if config.get_if_route_planning():
-                world.manager.visualize_path()
-            # 2) Advance the CARLA world one tick
-            #print(f'After RL tick: {datetime.now().time()}')
-            world.tick()
+            t += 1
+            try:
+                # 1) RL step: read obs, log transition, choose & apply new actions
+                obs, act, rew, done = rl.step()
+                print("step", t, "obs shape:", obs.shape, "act shape:", act.shape)
+
+                if config.get_if_route_planning():
+                    world.manager.visualize_path()
+
+                # 2) Advance the CARLA world one tick
+                world.tick()
+
+            except Exception as e:
+                print("[PIPELINE] Exception inside loop:", repr(e))
+                traceback.print_exc()
+                break   # exit while True so we still hit finally
 
     except KeyboardInterrupt:
-        print("Stopping...")
+        print("Stopping via KeyboardInterrupt...")
     finally:
         world.cleanup()
-    # world.run()
-    # world.cleanup()
-    #time.sleep(10) #Sleep for 10 seconds so that we can see the world
-
-    pass

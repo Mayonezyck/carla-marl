@@ -3,13 +3,18 @@ carla:
   port: 2000
 
 other:
-  pedestrian_count: 50
+  pedestrian_count: 0
 
 experiment:
-  controlled_count: 0
+  road_point_extractor:
+    step_size : 0.5
+    search_radius: 50
+    search_n_points: 200
+
+  controlled_count: 1
   route_planning_enable: True
-  sensorless_free_agent: False #False 
-  free_count: 50
+  sensorless_free_agent: True #False for CMPE assignment data collections
+  free_count: 10
   spawn_max_attempts: 100
   sensor_type: "lidar"
   lidar:

@@ -11,6 +11,9 @@ class ConfigLoader():
             cfg = load_config(config_path)
             self.host = cfg["carla"]["host"]
             self.port = cfg["carla"]["port"]
+            self.step_size = cfg["experiment"]["road_point_extractor"]["step_size"]
+            self.search_radius = cfg["experiment"]["road_point_extractor"]["search_radius"]
+            self.search_n_points = cfg["experiment"]["road_point_extractor"]["search_n_points"]
             self.ped_count = cfg["other"]["pedestrian_count"]
             self.controlled_count = cfg["experiment"]["controlled_count"]
             self.if_route_planning = cfg["experiment"]["route_planning_enable"]
@@ -29,6 +32,12 @@ class ConfigLoader():
         return self.host
     def get_port(self):
         return self.port
+    def get_step_size(self):
+        return self.step_size
+    def get_search_radius(self):
+        return self.search_radius
+    def get_search_n_points(self):
+        return self.search_n_points
     def get_controlled_count(self):
         return self.controlled_count
     def get_if_route_planning(self):
@@ -50,6 +59,7 @@ class ConfigLoader():
     #for debug
     def get_fixed_delta_seconds(self):
         return self.delta_seconds
+    
 
 if __name__ == "__main__":
     testLoader = ConfigLoader()
