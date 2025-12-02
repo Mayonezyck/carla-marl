@@ -685,8 +685,18 @@ class Manager:
 
                 r = 0.0
                 events = []
-                # reward for progress
-                r += 1.0 * progress
+
+                # Asymmetric progress reward:
+                # - moving closer: small positive
+                # - moving away: larger negative
+                W_FORWARD = 1.0   # reward weight
+                W_BACKWARD = 2.0  # penalty weight (> W_FORWARD)
+
+                if progress > 0.0:
+                    r += W_FORWARD * progress
+                else:
+                    r += W_BACKWARD * progress  # progress is negative here
+
 
                 done = False
 
