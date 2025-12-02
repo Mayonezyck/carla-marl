@@ -80,10 +80,13 @@ if __name__ == "__main__":
     # -----------------------------
     # 2) Build policy for RLHandler
     # -----------------------------
-    # If you want to use a remote policy server for actions:
+    use_dict_policy = False
+
     if config.get_use_policy() == "remote":
+        # Remote policy server expects flat CMPE obs
         policy = RemoteSimPolicy(base_url="http://0.0.0.0:7999")
-        # RLHandler will call policy(obs_batch) and then decode_discrete_action.
+        use_dict_policy = False
+
     elif config.get_use_policy() == "local-dqn":
         num_steer = len(STEER_BINS)
         num_accel = len(ACCEL_BINS)
@@ -100,11 +103,17 @@ if __name__ == "__main__":
             epsilon_decay_steps=50_000,
             target_update_freq=1000,
         )
+        # <- here we want dict-style obs with vision
+        use_dict_policy = True
+    else:
+        policy = None
+        use_dict_policy = False
 
     # -----------------------------
     # 3) RLHandler
     # -----------------------------
-    rl = RLHandler(world.manager, policy=policy)
+    rl = RLHandler(world.manager, policy=policy, use_dict_policy=use_dict_policy)
+
 
     # -----------------------------
     # 3b) Pygame visualization setup
@@ -123,8 +132,8 @@ if __name__ == "__main__":
     # 5) Episode settings
     # -----------------------------
     # If your config has these getters, use them; otherwise defaults.
-    max_episodes = getattr(config, "max_episodes", 50)
-    max_steps_per_episode = getattr(config, "max_steps_per_episode", 500)
+    max_episodes = getattr(config, "max_episodes", 200)
+    max_steps_per_episode = getattr(config, "max_steps_per_episode", 1000)
 
     print(
         f"[train_CMPE] Starting training: "
@@ -185,45 +194,103 @@ if __name__ == "__main__":
                         )
                         break
 
-                # 3) Pygame visualization: camera + text
+                # 3) Pygame visualization: RGB + segmentation + depth + text
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         raise KeyboardInterrupt
 
                 screen.fill((0, 0, 0))
 
-                # --- 3a) Try to get forward-facing camera from controlled agent 0 ---
                 ego_cam_rgb = None
+                seg_img = None
+                depth_img = None
+
+                # --------- grab latest camera data from controlled agent 0 ---------
                 if len(world.manager.controlled_agents) > 0:
                     ego_agent = world.manager.controlled_agents[0]
-                    if (
-                        ego_agent is not None
-                        and getattr(ego_agent, "vehicle", None) is not None
-                        and hasattr(ego_agent, "get_forward_latest")
-                    ):
-                        ego_cam_rgb = ego_agent.get_forward_latest()
 
-                text_x = 10  # default text x offset
+                    if ego_agent is not None and getattr(ego_agent, "vehicle", None) is not None:
+                        # Forward RGB camera
+                        if hasattr(ego_agent, "get_forward_latest"):
+                            ego_cam_rgb = ego_agent.get_forward_latest()
 
+                        # Segmentation
+                        if hasattr(ego_agent, "get_seg_latest"):
+                            seg_img = ego_agent.get_seg_latest()
+
+                        # Depth
+                        if hasattr(ego_agent, "get_depth_latest"):
+                            depth_img = ego_agent.get_depth_latest()
+
+                # Layout:
+                #   RGB:  left, size 480x360 at (0, 0)
+                #   SEG:  top-right, size 320x180 at (480, 0)
+                #   DEPTH:bottom-right, size 320x180 at (480, 180)
+                #   Text: along bottom starting at y = 380
+
+                # --------- draw RGB camera ---------
                 if ego_cam_rgb is not None:
-                    # ego_cam_rgb expected shape: (H, W, 3) uint8
-                    cam_array = np.asarray(ego_cam_rgb, dtype=np.uint8)
-                    h, w, _ = cam_array.shape
+                    rgb_arr = np.asarray(ego_cam_rgb, dtype=np.uint8)
+                    # Expect (H, W, 3)
+                    if rgb_arr.ndim == 3 and rgb_arr.shape[2] >= 3:
+                        rgb_vis = rgb_arr[:, :, :3]
+                        rgb_surface = pygame.surfarray.make_surface(
+                            rgb_vis.swapaxes(0, 1)
+                        )
+                        rgb_surface = pygame.transform.scale(rgb_surface, (480, 360))
+                        screen.blit(rgb_surface, (0, 0))
 
-                    # Pygame wants (W, H, 3)
-                    cam_surface = pygame.surfarray.make_surface(cam_array.swapaxes(0, 1))
+                # --------- draw segmentation ---------
+                if seg_img is not None:
+                    seg_arr = np.asarray(seg_img)
+                    # Handle (H, W) or (H, W, 1) or (H, W, 3)
+                    if seg_arr.ndim == 2:
+                        # normalize to [0, 255] for display
+                        max_val = float(seg_arr.max()) if seg_arr.max() > 0 else 1.0
+                        seg_norm = (seg_arr.astype(np.float32) / max_val) * 255.0
+                        seg_norm = seg_norm.astype(np.uint8)
+                        seg_vis = np.stack([seg_norm] * 3, axis=-1)  # grayscale to RGB
+                    elif seg_arr.ndim == 3 and seg_arr.shape[2] == 1:
+                        seg_vis = np.repeat(seg_arr.astype(np.uint8), 3, axis=2)
+                    elif seg_arr.ndim == 3 and seg_arr.shape[2] >= 3:
+                        seg_vis = seg_arr[:, :, :3].astype(np.uint8)
+                    else:
+                        seg_vis = None
 
-                    # Scale to fit left portion of the 800x600 window
-                    # e.g. 512x384
-                    cam_surface = pygame.transform.scale(cam_surface, (512, 384))
+                    if seg_vis is not None:
+                        seg_surface = pygame.surfarray.make_surface(
+                            seg_vis.swapaxes(0, 1)
+                        )
+                        seg_surface = pygame.transform.scale(seg_surface, (320, 180))
+                        screen.blit(seg_surface, (480, 0))
 
-                    # Blit at top-left
-                    screen.blit(cam_surface, (0, 0))
+                # --------- draw depth ---------
+                if depth_img is not None:
+                    depth_arr = np.asarray(depth_img, dtype=np.float32)
+                    # Handle (H, W) or (H, W, 1) or (H, W, 3)
+                    if depth_arr.ndim == 3 and depth_arr.shape[2] == 1:
+                        depth_arr = depth_arr[:, :, 0]
+                    elif depth_arr.ndim == 3 and depth_arr.shape[2] >= 3:
+                        # if somehow RGB encoded, take one channel
+                        depth_arr = depth_arr[:, :, 0]
 
-                    # Shift text to the right of the camera
-                    text_x = 520
+                    if depth_arr.ndim == 2:
+                        # normalize to [0, 255] using a cap (e.g., 100m)
+                        depth_cap = 100.0
+                        depth_norm = np.clip(depth_arr / depth_cap, 0.0, 1.0)
+                        depth_vis = (depth_norm * 255.0).astype(np.uint8)
+                        depth_vis = np.stack([depth_vis] * 3, axis=-1)  # grayscale to RGB
+                    else:
+                        depth_vis = None
 
-                # --- 3b) Build text lines ---
+                    if depth_vis is not None:
+                        depth_surface = pygame.surfarray.make_surface(
+                            depth_vis.swapaxes(0, 1)
+                        )
+                        depth_surface = pygame.transform.scale(depth_surface, (320, 180))
+                        screen.blit(depth_surface, (480, 180))
+
+                # --------- build and draw text ---------
                 lines = [
                     f"Episode: {ep}",
                     f"Step in episode: {step_in_ep}",
@@ -233,20 +300,20 @@ if __name__ == "__main__":
                 if rew is not None and rew.shape[0] > 0:
                     lines.append(f"Reward[0] this step: {float(rew[0]):.3f}")
 
-                # Show first few ego obs entries for controlled agent 0
                 if obs.shape[0] > 0:
                     ego_obs = obs[0]
                     lines.append("Ego obs[0..9]:")
                     for i in range(min(len(ego_obs), 10)):
                         lines.append(f"  o[{i}] = {ego_obs[i]: .3f}")
 
-                y = 10
+                text_y = 380
                 for line in lines:
                     text_surface = font.render(line, True, (255, 255, 255))
-                    screen.blit(text_surface, (text_x, y))
-                    y += 20
+                    screen.blit(text_surface, (10, text_y))
+                    text_y += 20
 
                 pygame.display.flip()
+
 
 
                 # 4) Capture the current Pygame window into the episode video buffer

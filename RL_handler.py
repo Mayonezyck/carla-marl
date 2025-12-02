@@ -89,28 +89,31 @@ class RLHandler:
         action_dim: int = 3,
         replay_capacity: int = 100_000,
         policy: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+        use_dict_policy: bool = False,
     ) -> None:
         """
         manager : your Manager instance
         action_dim : # of action components per agent (throttle, steer, brake → 3)
         replay_capacity : max transitions in buffer
-        policy : optional callable(obs_batch) -> actions_batch
-        obs_batch: (N, CMPE_OBS_DIM)
-        returns:   (N,) discrete actions or (N, action_dim)
-
+        policy : callable that takes either
+                 - np.ndarray of shape (N, CMPE_OBS_DIM), or
+                 - a dict with keys {"cmpe", "seg", "depth"} when use_dict_policy=True
+                 and returns (N,) discrete actions.
         """
         self.manager = manager
         self.action_dim = int(action_dim)
         self.policy = policy
+        self.use_dict_policy = use_dict_policy
         self.buffer = SimpleReplayBuffer(replay_capacity)
 
         # Cached from previous step
-        self.last_obs = None       # type: Optional[np.ndarray]   # (N, P, 3)
+        self.last_obs = None       # type: Optional[np.ndarray]   # (N, CMPE_OBS_DIM)
         self.last_actions = None   # type: Optional[np.ndarray]   # (N, action_dim)
         self.last_disc_actions = None  # type: Optional[np.ndarray]  # (N,)
 
         self.step_count: int = 0
-        self.debug_history = [] 
+        self.debug_history = []
+
 
     # --------------------------------------------------
     # Public API
@@ -166,13 +169,26 @@ class RLHandler:
 
         # 3) Compute new actions from current obs
         if self.policy is not None:
-            # GPUDrive returns discrete values; decode here
-            discrete_actions = self.policy(obs_t)       # shape (N,) or scalar
+            # If use_dict_policy=True, build a dict observation with CMPE + vision.
+            if self.use_dict_policy:
+                seg_batch, depth_batch = self._get_seg_depth_from_manager()
+                policy_input = {
+                    "cmpe": obs_t,        # (N, CMPE_OBS_DIM)
+                    "seg": seg_batch,     # (N, H, W) or (N, C, H, W)
+                    "depth": depth_batch  # (N, H, W)
+                }
+            else:
+                # Old behavior: plain CMPE obs
+                policy_input = obs_t
+
+            # Policy returns discrete actions; decode into continuous CARLA control
+            discrete_actions = self.policy(policy_input)  # shape (N,) or scalar
             actions_t = self.decode_discrete_action(discrete_actions)
             disc_np = np.asarray(discrete_actions).reshape(-1)
         else:
             actions_t = self._default_policy(obs_t)
             disc_np = np.full((obs_t.shape[0],), np.nan, dtype=np.float32)
+
 
         # Cache discrete actions for the NEXT transition storage
         if self.policy is not None:
@@ -264,6 +280,84 @@ class RLHandler:
 
         obs_batch = np.stack(obs_list, axis=0)  # (N, CMPE_OBS_DIM)
         return obs_batch
+    
+
+    def _get_seg_depth_from_manager(self):
+        """
+        Collect segmentation and depth observations for all controlled agents.
+
+        We assume each Controlled_Agents instance exposes:
+            - get_segmentation_latest()
+            - get_depth_latest()
+
+        Each may return either:
+            - None
+            - img (np.ndarray or torch.Tensor)
+            - (frame_id, img)
+
+        Returns
+        -------
+        seg_batch   : np.ndarray, shape (N, H, W) or (N, C, H, W)
+        depth_batch : np.ndarray, shape (N, H, W)
+        """
+        seg_list = []
+        depth_list = []
+
+        for agent in self.manager.controlled_agents:
+            seg_arr = None
+            depth_arr = None
+
+            if agent is not None and getattr(agent, "vehicle", None) is not None:
+                # ---- segmentation ----
+                if hasattr(agent, "get_segmentation_latest"):
+                    seg_latest = agent.get_segmentation_latest()
+                    if seg_latest is not None:
+                        if isinstance(seg_latest, tuple) and len(seg_latest) == 2:
+                            _, seg_arr = seg_latest
+                        else:
+                            seg_arr = seg_latest
+
+                # ---- depth ----
+                if hasattr(agent, "get_depth_latest"):
+                    depth_latest = agent.get_depth_latest()
+                    if depth_latest is not None:
+                        if isinstance(depth_latest, tuple) and len(depth_latest) == 2:
+                            _, depth_arr = depth_latest
+                        else:
+                            depth_arr = depth_latest
+
+            seg_list.append(seg_arr)
+            depth_list.append(depth_arr)
+
+        # infer default shapes from first non-None entry
+        def _infer_shape(arrs, default_shape=(64, 64)):
+            for a in arrs:
+                if a is not None:
+                    return np.asarray(a).shape
+            return default_shape
+
+        seg_shape = _infer_shape(seg_list, default_shape=(64, 64))
+        depth_shape = _infer_shape(depth_list, default_shape=(64, 64))
+
+        def _make_batch(arrs, shape):
+            out = []
+            for a in arrs:
+                if a is None:
+                    out.append(np.zeros(shape, dtype=np.float32))
+                else:
+                    a_np = np.asarray(a, dtype=np.float32)
+                    if a_np.shape != shape:
+                        raise ValueError(
+                            f"Vision obs has shape {a_np.shape}, expected {shape}. "
+                            "Adapt _get_seg_depth_from_manager to handle resizing."
+                        )
+                    out.append(a_np)
+            return np.stack(out, axis=0)
+
+        seg_batch = _make_batch(seg_list, seg_shape)
+        depth_batch = _make_batch(depth_list, depth_shape)
+
+        return seg_batch, depth_batch
 
 
     def _get_gpudrive_obs_from_manager(self) -> np.ndarray:

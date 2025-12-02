@@ -73,7 +73,12 @@ class Controlled_Agents(Agent):
         self._last_forward_rgb: Optional[np.ndarray] = None
         self._setup_forward_camera()
 
-        
+        self._seg_cam_queue = queue.Queue()
+        self._last_seg = None             # (H, W) int IDs or (H, W, 1)
+        self._depth_cam_queue = queue.Queue()
+        self._last_depth = None           # (H, W) float32 meters
+
+        self._setup_seg_depth_cameras() #NOTE: THESE GOTTA BE REPLACED BY ANDREW's unets
         
 
     def _add_other_sensors(self):
@@ -198,6 +203,85 @@ class Controlled_Agents(Agent):
         or None if nothing has arrived yet.
         """
         return self._last_forward_rgb
+    
+    def get_seg_latest(self):
+        """Return latest segmentation as (H, W) class ID array or None."""
+        return self._last_seg
+
+    def get_depth_latest(self):
+        """Return latest depth as (H, W) float32 meters or None."""
+        return self._last_depth
+
+
+    def _setup_seg_depth_cameras(self) -> None:
+        """
+        Attach semantic segmentation and depth cameras in the same forward-looking pose.
+        """
+        if self.vehicle is None:
+            return
+
+        bp_lib = self.world.get_blueprint_library()
+
+        # Shared camera pose
+        cam_tf = carla.Transform(
+            carla.Location(x=1.5, y=0.0, z=1.6),
+            carla.Rotation(pitch=0.0, yaw=0.0, roll=0.0),
+        )
+
+        # --------- semantic segmentation camera ----------
+        seg_bp = bp_lib.find("sensor.camera.semantic_segmentation")
+        seg_bp.set_attribute("image_size_x", "128")
+        seg_bp.set_attribute("image_size_y", "128")
+        seg_bp.set_attribute("fov", "90")
+
+        seg_cam = self.world.spawn_actor(seg_bp, cam_tf, attach_to=self.vehicle)
+
+        def _seg_callback(image: carla.Image):
+            import numpy as np
+            # raw_data is BGRA where R channel encodes class ID
+            arr = np.frombuffer(image.raw_data, dtype=np.uint8)
+            arr = arr.reshape((image.height, image.width, 4))
+            class_ids = arr[:, :, 2]  # carla uses R, but in BGRA that's index 2
+            self._last_seg = class_ids
+            try:
+                self._seg_cam_queue.put_nowait((image.frame, class_ids))
+            except queue.Full:
+                pass
+
+        seg_cam.listen(_seg_callback)
+        self.sensors.append(seg_cam)
+
+        # --------- depth camera ----------
+        depth_bp = bp_lib.find("sensor.camera.depth")
+        depth_bp.set_attribute("image_size_x", "128")
+        depth_bp.set_attribute("image_size_y", "128")
+        depth_bp.set_attribute("fov", "90")
+
+        depth_cam = self.world.spawn_actor(depth_bp, cam_tf, attach_to=self.vehicle)
+
+        def _depth_callback(image: carla.Image):
+            import numpy as np
+            # CARLA encodes depth as 24-bit in RGB
+            arr = np.frombuffer(image.raw_data, dtype=np.uint8)
+            arr = arr.reshape((image.height, image.width, 4))
+            r = arr[:, :, 2].astype(np.float32)
+            g = arr[:, :, 1].astype(np.float32)
+            b = arr[:, :, 0].astype(np.float32)
+
+            # as per CARLA docs: depth in [0,1]
+            depth_norm = (r + g * 256.0 + b * 256.0 * 256.0) / (256.0**3 - 1.0)
+            # convert to meters using a max depth (e.g. 1000m)
+            depth_m = 1000.0 * depth_norm
+            self._last_depth = depth_m
+            try:
+                self._depth_cam_queue.put_nowait((image.frame, depth_m))
+            except queue.Full:
+                pass
+
+        depth_cam.listen(_depth_callback)
+        self.sensors.append(depth_cam)
+
+
 
         
     def _add_collision_sensor(self) -> None:
@@ -283,6 +367,7 @@ class Controlled_Agents(Agent):
             brake=max(0.0, min(1.0, brake)),
         )
         self.vehicle.apply_control(control)
+        self.last_control = control
 
     @property
     def had_collision(self) -> bool:

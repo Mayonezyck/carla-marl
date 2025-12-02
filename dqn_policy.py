@@ -65,28 +65,48 @@ class DQNPolicy:
         self.epsilon_decay_steps = epsilon_decay_steps
         self.total_steps = 0
 
-    # Make it callable: policy(obs_batch_np) -> discrete actions
-    def __call__(self, obs_batch: np.ndarray) -> np.ndarray:
+    # Make it callable: policy(obs_batch) -> discrete actions
+    def __call__(self, obs_batch) -> np.ndarray:
         """
-        obs_batch: (N, obs_dim), np.float32
+        obs_batch can be:
+          - np.ndarray of shape (N, obs_dim), or
+          - dict with at least key "cmpe": np.ndarray of shape (N, obs_dim)
+            (other keys like "seg", "depth" are currently ignored here)
+
         returns: (N,) int32 discrete actions
         """
-        self.total_steps += obs_batch.shape[0]
+        # Extract the CMPE vector if a dict is passed
+        if isinstance(obs_batch, dict):
+            cmpe = obs_batch.get("cmpe", None)
+            if cmpe is None:
+                raise ValueError("DQNPolicy: expected 'cmpe' key in obs dict.")
+            obs_np = np.asarray(cmpe, dtype=np.float32)
+        else:
+            obs_np = np.asarray(obs_batch, dtype=np.float32)
+
+        if obs_np.ndim != 2 or obs_np.shape[1] != self.obs_dim:
+            raise ValueError(
+                f"DQNPolicy: expected obs shape (N, {self.obs_dim}), "
+                f"got {obs_np.shape}"
+            )
+
+        self.total_steps += obs_np.shape[0]
 
         eps = self._current_epsilon()
 
         # Random actions with prob epsilon
         if np.random.rand() < eps:
             return np.random.randint(
-                0, self.num_actions, size=(obs_batch.shape[0],), dtype=np.int64
+                0, self.num_actions, size=(obs_np.shape[0],), dtype=np.int64
             )
 
         # Greedy actions from Q-network
-        obs_t = torch.from_numpy(obs_batch).float().to(self.device)
+        obs_t = torch.from_numpy(obs_np).float().to(self.device)
         with torch.no_grad():
             q_values = self.q_net(obs_t)  # (N, num_actions)
             actions = torch.argmax(q_values, dim=1)  # (N,)
         return actions.cpu().numpy().astype(np.int64)
+
 
     def _current_epsilon(self) -> float:
         frac = min(1.0, self.total_steps / float(self.epsilon_decay_steps))

@@ -676,6 +676,7 @@ class Manager:
                 lane_inv_flag = bool(getattr(agent, "had_lane_invasion", False))
                 if lane_inv_flag:
                     r -= 5.0
+                    agent.had_lane_invasion = False  
 
                 # ------------------------------------------------------------------
                 # Red-light violation penalty
