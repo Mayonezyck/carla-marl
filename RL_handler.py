@@ -15,8 +15,9 @@ class SimpleReplayBuffer:
     Very simple replay buffer:
     - Stores transitions in a ring buffer.
     - Each transition is a dict with keys:
-        'obs', 'action', 'reward', 'next_obs', 'done'
-    - This is enough to plug into a learner later.
+        'obs', 'action', 'disc_action', 'reward', 'next_obs', 'done'
+    - 'action' is the continuous (throttle, steer, brake).
+    - 'disc_action' is the discrete action index (int) or None.
     """
     def __init__(self, capacity: int = 100_000) -> None:
         self.capacity = int(capacity)
@@ -28,20 +29,35 @@ class SimpleReplayBuffer:
 
     def add_batch(
         self,
-        obs: np.ndarray,        # (N, ..., ...)
-        actions: np.ndarray,    # (N, action_dim)
-        rewards: np.ndarray,    # (N,)
-        next_obs: np.ndarray,   # (N, ..., ...)
-        dones: np.ndarray,      # (N,)
+        obs: np.ndarray,              # (N, obs_dim)
+        actions: np.ndarray,          # (N, action_dim) continuous
+        rewards: np.ndarray,          # (N,)
+        next_obs: np.ndarray,         # (N, obs_dim)
+        dones: np.ndarray,            # (N,)
+        disc_actions: Optional[np.ndarray] = None,  # (N,) discrete or None
     ) -> None:
         batch_size = obs.shape[0]
+
+        # Normalize disc_actions to per-sample scalar or None
+        if disc_actions is not None:
+            disc_actions = np.asarray(disc_actions)
+            if disc_actions.ndim == 0:
+                disc_actions = disc_actions.reshape(1)
+            assert disc_actions.shape[0] == batch_size, (
+                f"disc_actions batch size {disc_actions.shape[0]} "
+                f"!= obs batch size {batch_size}"
+            )
+
         for i in range(batch_size):
             transition = {
-                "obs":      np.array(obs[i], copy=True),
-                "action":   np.array(actions[i], copy=True),
-                "reward":   float(rewards[i]),
-                "next_obs": np.array(next_obs[i], copy=True),
-                "done":     bool(dones[i]),
+                "obs":        np.array(obs[i], copy=True),
+                "action":     np.array(actions[i], copy=True),
+                "reward":     float(rewards[i]),
+                "next_obs":   np.array(next_obs[i], copy=True),
+                "done":       bool(dones[i]),
+                "disc_action": (
+                    int(disc_actions[i]) if disc_actions is not None else None
+                ),
             }
 
             if len(self.storage) < self.capacity:
@@ -50,10 +66,10 @@ class SimpleReplayBuffer:
                 self.storage[self.pos] = transition
                 self.pos = (self.pos + 1) % self.capacity
 
-    # Optional helper if you want to sample later
     def sample(self, batch_size: int) -> List[Dict[str, Any]]:
         idxs = np.random.randint(0, len(self.storage), size=batch_size)
         return [self.storage[i] for i in idxs]
+
 
 
 class RLHandler:
