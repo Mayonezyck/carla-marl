@@ -1,4 +1,5 @@
 import carla, os, sys,glob
+import numpy as np
 from customAgents import Agent
 import random
 from typing import Dict, Any, List, Optional
@@ -65,6 +66,11 @@ class Controlled_Agents(Agent):
         self.had_lane_invasion = False
         self._add_other_sensors()
         self._setup_sensors_from_config()
+        # Forward-facing debug camera (for visualization / future RL input)
+        self._forward_cam_queue: "queue.Queue[tuple[int, np.ndarray]]" = queue.Queue()
+        self._last_forward_rgb: Optional[np.ndarray] = None
+        self._setup_forward_camera()
+
         
         
 
@@ -99,6 +105,59 @@ class Controlled_Agents(Agent):
 
         lane_inv_sensor.listen(lane_inv_callback)
         self.sensors.append(lane_inv_sensor)
+
+
+    def _setup_forward_camera(self) -> None:
+        """
+        Spawn a forward-facing RGB camera on the ego vehicle for visualization
+        (and potential RL input later).
+        """
+        if self.vehicle is None:
+            return
+
+        blueprint_library = self.world.get_blueprint_library()
+        cam_bp = blueprint_library.find("sensor.camera.rgb")
+
+        # Reasonable debug resolution
+        cam_bp.set_attribute("image_size_x", "640")
+        cam_bp.set_attribute("image_size_y", "480")
+        cam_bp.set_attribute("fov", "90")  # standard-ish FOV
+
+        # Place camera slightly in front and above the hood, looking forward.
+        cam_transform = carla.Transform(
+            carla.Location(x=1.5, y=0.0, z=1.6),  # forward, center, up
+            carla.Rotation(pitch=0.0, yaw=0.0, roll=0.0),
+        )
+
+        camera = self.world.spawn_actor(
+            cam_bp,
+            cam_transform,
+            attach_to=self.vehicle,
+        )
+
+        def _forward_cam_callback(image: carla.Image):
+            # Convert raw BGRA buffer -> (H, W, 3) uint8 RGB
+            import numpy as np
+
+            array = np.frombuffer(image.raw_data, dtype=np.uint8)
+            array = array.reshape((image.height, image.width, 4))
+            rgb = array[:, :, :3]  # drop alpha
+
+            self._last_forward_rgb = rgb
+            try:
+                self._forward_cam_queue.put_nowait((image.frame, rgb))
+            except queue.Full:
+                pass
+
+        camera.listen(_forward_cam_callback)
+        self.sensors.append(camera)
+
+    def get_forward_latest(self) -> Optional[np.ndarray]:
+        """
+        Return the latest forward-facing RGB frame as a (H, W, 3) uint8 array,
+        or None if nothing has arrived yet.
+        """
+        return self._last_forward_rgb
 
         
     def _add_collision_sensor(self) -> None:

@@ -19,7 +19,7 @@ from RL_handler import RLHandler
 from remote_policy import RemoteSimPolicy
 from RL_handler import RLHandler, CMPE_OBS_DIM, STEER_BINS, ACCEL_BINS
 from dqn_policy import DQNPolicy
-
+from visualizer_cmpe import PygameVisualizer
 
 
 def maybe_train_from_buffer(rl: RLHandler, step: int) -> None:
@@ -83,7 +83,12 @@ if __name__ == "__main__":
     rl = RLHandler(world.manager, policy=policy)
 
     # -----------------------------
-    # 4) Episode settings
+    # 4) Visualizer
+    # -----------------------------
+    visualizer = PygameVisualizer()
+
+    # -----------------------------
+    # 5) Episode settings
     # -----------------------------
     # If your config has these getters, use them; otherwise defaults.
     max_episodes = getattr(config, "max_episodes", 50)
@@ -109,14 +114,10 @@ if __name__ == "__main__":
             for step_in_ep in range(1, max_steps_per_episode + 1):
                 global_step += 1
 
-                # 1) RL step: read obs, log transition, choose & apply new actions
+                # 1) RL step
                 obs, act, rew, done = rl.step()
-                # obs:  (N, CMPE_OBS_DIM)
-                # act:  (N, 3)
-                # rew:  (N,) or None on the very first ever step
-                # done: (N,) or None on the very first ever step
 
-                # Debug print (you can comment this out if too noisy)
+                # Debug print (optional)
                 print(
                     f"[train_CMPE] ep {ep} | step {step_in_ep} "
                     f"| obs shape: {obs.shape}, act shape: {act.shape}"
@@ -126,17 +127,95 @@ if __name__ == "__main__":
                 if config.get_if_route_planning():
                     world.manager.visualize_path()
 
-                # 2) Optionally run a training step from replay buffer
+                # 2) DQN training step
                 if rew is not None:
-                    maybe_train_from_buffer(rl, global_step)
+                    policy.train_step(rl.buffer)
 
-                    # If all controlled agents are done, end the episode
+                    # Early episode termination if all controlled agents done
                     if np.all(done):
                         print(
                             f"[train_CMPE] Episode {ep} finished early at "
                             f"step {step_in_ep} (all agents done)."
                         )
-                        break
+                        # we still want one last visualization before break
+                        # so don't break yet, just mark and handle after vis if you want
+                        episode_done_here = True
+                    else:
+                        episode_done_here = False
+                else:
+                    episode_done_here = False
+
+                # 3) Visualization (top-down camera + ego obs + info)
+                ego_rgb = None
+                ego_obs_vec = None
+                last_reward_ego = 0.0
+
+                # Controlled vehicle 0
+                if len(world.manager.controlled_agents) > 0:
+                    ego_agent = world.manager.controlled_agents[0]
+                    if ego_agent is not None and getattr(ego_agent, "vehicle", None) is not None:
+                        # Top-down image
+                        ego_rgb = ego_agent.get_forward_latest()
+
+                        # Ego CMPE obs (10D)
+                        ego_obs_vec = world.manager.get_agent_cmpe_style_obs(ego_agent)
+
+                if rew is not None and rew.shape[0] > 0:
+                    last_reward_ego = float(rew[0])
+
+                # Build text lines for the right panel
+                text_lines = [
+                    f"Episode: {ep}",
+                    f"Step in episode: {step_in_ep}",
+                    f"Global step: {global_step}",
+                    f"Last reward [ego]: {last_reward_ego:.3f}",
+                    "",
+                    "Ego CMPE obs (10D):",
+                ]
+
+                if ego_obs_vec is not None:
+                    # Your get_agent_cmpe_style_obs docstring says:
+                    # [speed_norm,
+                    #  heading_err_norm,
+                    #  dist_to_goal_norm,
+                    #  lateral_norm,
+                    #  collision_flag,
+                    #  lane_invasion_flag,
+                    #  traffic_light_red_flag,
+                    #  at_junction_flag,
+                    #  throttle_prev,
+                    #  steer_prev]
+                    names = [
+                        "speed_norm",
+                        "heading_err_norm",
+                        "dist_to_goal_norm",
+                        "lateral_norm",
+                        "collision_flag",
+                        "lane_invasion_flag",
+                        "traffic_light_red_flag",
+                        "at_junction_flag",
+                        "throttle_prev",
+                        "steer_prev",
+                    ]
+                    for name, val in zip(names, ego_obs_vec.tolist()):
+                        text_lines.append(f"  {name}: {val:.3f}")
+                else:
+                    text_lines.append("  <no ego obs>")
+
+                # Render in pygame (handles events internally)
+                try:
+                    visualizer.render(ego_rgb, text_lines)
+                except KeyboardInterrupt:
+                    # Closing the window or pressing ESC will bubble up
+                    raise
+
+                # 4) Advance CARLA world
+                world.tick()
+
+                # If we flagged early episode termination, break now
+                if episode_done_here:
+                    break
+
 
                 # 3) Advance the CARLA world one tick
                 world.tick()
