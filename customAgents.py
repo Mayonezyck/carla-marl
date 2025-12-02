@@ -65,15 +65,15 @@ class Agent:
 
             # Role name for debugging & filtering
             
-            spawn_point = self.find_closest_spawn(spawn_points) #FOR EASE of OBSERVATION I USE THIS SPAWN FINDING 
-            #spawn_point = spawn_points[attempts % len(spawn_points)]
+            #spawn_point = self.find_closest_spawn(spawn_points) #FOR EASE of OBSERVATION I USE THIS SPAWN FINDING 
+            spawn_point = spawn_points[attempts % len(spawn_points)]
             self.starting_point = spawn_point.location
             if self.role_prefix == "controlled_agent":
                 start = self.starting_point
                 self.destination = self._pick_nearby_destination(
                     world=self.world,
                     start_location=self.starting_point,
-                    min_distance=50.0,   # or whatever you want
+                    min_distance=200,   # or whatever you want
                     step=2.0,
                 )
                 dest = self.destination

@@ -11,6 +11,7 @@ class ConfigLoader():
             cfg = load_config(config_path)
             self.host = cfg["carla"]["host"]
             self.port = cfg["carla"]["port"]
+            self.policy = cfg["experiment"]["policy"]
             self.step_size = cfg["experiment"]["road_point_extractor"]["step_size"]
             self.search_radius = cfg["experiment"]["road_point_extractor"]["search_radius"]
             self.search_n_points = cfg["experiment"]["road_point_extractor"]["search_n_points"]
@@ -32,6 +33,8 @@ class ConfigLoader():
         return self.host
     def get_port(self):
         return self.port
+    def get_use_policy(self):
+        return self.policy
     def get_step_size(self):
         return self.step_size
     def get_search_radius(self):

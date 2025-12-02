@@ -11,10 +11,13 @@ from remote_policy import RemoteSimPolicy
 
 if __name__ == "__main__": 
     #Starting Carla Client
-    config = ConfigLoader()
+    #config = ConfigLoader()
+    config = ConfigLoader("config_cmpe.yaml")
     client = carlaClient()
     world = CarlaWorld(config)
-    policy = RemoteSimPolicy(base_url="http://0.0.0.0:7999")
+    policy = None
+    if config.get_use_policy() == 'remote':
+        policy = RemoteSimPolicy(base_url="http://0.0.0.0:7999") #when running policy server in other environments.
     rl = RLHandler(world.manager, policy=policy)
 
     from datetime import datetime
@@ -43,4 +46,8 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("Stopping via KeyboardInterrupt...")
     finally:
+        try:
+            rl.save_debug_history("carla_debug.pkl")
+        except Exception as e:
+            print("[PIPELINE] Error saving debug history:", repr(e))
         world.cleanup()

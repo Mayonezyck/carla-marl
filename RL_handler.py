@@ -114,7 +114,7 @@ class RLHandler:
             dones    : np.ndarray, shape (N,) or None on the very first call
         """
         # 1) Get current obs from all controlled agents (GPUDrive-style)
-        obs_t = self._get_gpudrive_obs_from_manager()  # (num_agents, obs_dim)
+        obs_t = self._get_gpudrive_obs_from_manager()  # (num_agents, obs_dim) # This is only used when GPUDrive is needed
 
         rewards = None
         dones = None
@@ -143,6 +143,15 @@ class RLHandler:
 
         else:
             actions_t = self._default_policy(obs_t)
+
+        if self.policy is not None:
+            discrete_actions = self.policy(obs_t)       # shape (N,) or scalar
+            actions_t = self.decode_discrete_action(discrete_actions)
+            disc_np = np.asarray(discrete_actions).reshape(-1)
+        else:
+            actions_t = self._default_policy(obs_t)
+            # No discrete index in default policy; mark as NaN
+            disc_np = np.full((obs_t.shape[0],), np.nan, dtype=np.float32)
 
         # Ensure actions are (N, action_dim)
         actions_t = np.asarray(actions_t, dtype=np.float32)
@@ -325,3 +334,33 @@ class RLHandler:
         rewards, dones = self.manager.get_rewards_and_dones()
 
         return rewards, dones
+    
+    def save_debug_history(self, path: str = "carla_debug.pkl") -> None:
+        """
+        Save debug_history to disk for offline visualization.
+        """
+        import pickle
+        if not self.debug_history:
+            print("[RLHandler] No debug history to save.")
+            return
+
+        steps = np.array([e["step"] for e in self.debug_history], dtype=np.int64)
+        ego_raw = np.stack([e["ego_raw"] for e in self.debug_history], axis=0)  # (T, 6)
+        disc_actions = np.array([e["disc_action"] for e in self.debug_history], dtype=np.float32)
+        decoded = np.stack(
+            [[e["throttle"], e["steer"], e["brake"]] for e in self.debug_history],
+            axis=0,
+        )  # (T, 3)
+
+        payload = {
+            "steps": steps,
+            "ego_raw": ego_raw,
+            "disc_actions": disc_actions,
+            "decoded_actions": decoded,
+        }
+
+        with open(path, "wb") as f:
+            pickle.dump(payload, f)
+
+        print(f"[RLHandler] Saved debug history to {path} "
+              f"(T={steps.shape[0]} steps).")
