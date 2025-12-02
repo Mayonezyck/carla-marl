@@ -13,6 +13,7 @@ __pycache__/
 output*/
 output_*
 cmpe_run_*/
+cmpe_ppo_run_*/
 
 # Distribution / packaging
 .Python
