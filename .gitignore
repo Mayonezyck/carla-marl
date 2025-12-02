@@ -12,6 +12,7 @@ __pycache__/
 # dataset
 output*/
 output_*
+cmpe_run_*/
 
 # Distribution / packaging
 .Python

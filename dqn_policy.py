@@ -141,3 +141,38 @@ class DQNPolicy:
         # Periodically update target network
         if self.total_steps % self.target_update_freq == 0:
             self.target_net.load_state_dict(self.q_net.state_dict())
+
+
+    def save(self, path: str) -> None:
+        """Save Q-network, target network, optimizer, and meta info."""
+        state = {
+            "q_net_state": self.q_net.state_dict(),
+            "target_net_state": self.target_net.state_dict(),
+            "optimizer_state": self.optimizer.state_dict(),
+            "obs_dim": self.obs_dim,
+            "num_actions": self.num_actions,
+            "gamma": self.gamma,
+            "batch_size": self.batch_size,
+            "epsilon_start": self.epsilon_start,
+            "epsilon_end": self.epsilon_end,
+            "epsilon_decay_steps": self.epsilon_decay_steps,
+            "total_steps": self.total_steps,
+            "target_update_freq": self.target_update_freq,
+        }
+        torch.save(state, path)
+
+    def load(self, path: str) -> None:
+        """Load Q-network, target network, optimizer, and meta info."""
+        state = torch.load(path, map_location=self.device)
+        self.q_net.load_state_dict(state["q_net_state"])
+        self.target_net.load_state_dict(state["target_net_state"])
+        self.optimizer.load_state_dict(state["optimizer_state"])
+
+        # Restore meta info if present
+        self.gamma = state.get("gamma", self.gamma)
+        self.batch_size = state.get("batch_size", self.batch_size)
+        self.epsilon_start = state.get("epsilon_start", self.epsilon_start)
+        self.epsilon_end = state.get("epsilon_end", self.epsilon_end)
+        self.epsilon_decay_steps = state.get("epsilon_decay_steps", self.epsilon_decay_steps)
+        self.total_steps = state.get("total_steps", self.total_steps)
+        self.target_update_freq = state.get("target_update_freq", self.target_update_freq)

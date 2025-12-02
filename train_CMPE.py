@@ -21,6 +21,14 @@ from RL_handler import RLHandler, CMPE_OBS_DIM, STEER_BINS, ACCEL_BINS
 from dqn_policy import DQNPolicy
 from visualizer_cmpe import PygameVisualizer
 
+import os
+import shutil
+from pathlib import Path
+
+import imageio
+import pygame
+
+
 
 def maybe_train_from_buffer(rl: RLHandler, step: int) -> None:
     """
@@ -45,6 +53,22 @@ if __name__ == "__main__":
     # 1) Load config & create world
     # -----------------------------
     config = ConfigLoader("config_cmpe.yaml")
+
+    # Create per-run output directory with timestamp
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_output_dir = Path(f"cmpe_run_{run_timestamp}")
+    videos_dir = base_output_dir / "videos"
+    policies_dir = base_output_dir / "policies"
+
+    base_output_dir.mkdir(parents=True, exist_ok=True)
+    videos_dir.mkdir(parents=True, exist_ok=True)
+    policies_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save a copy of the config file into the run folder
+    config_path = Path("config_cmpe.yaml")
+    if config_path.exists():
+        shutil.copy(config_path, base_output_dir / config_path.name)
+
 
     # Start CARLA client (your wrapper)
     client = carlaClient()
@@ -83,6 +107,14 @@ if __name__ == "__main__":
     rl = RLHandler(world.manager, policy=policy)
 
     # -----------------------------
+    # 3b) Pygame visualization setup
+    # -----------------------------
+    pygame.init()
+    screen = pygame.display.set_mode((800, 600))
+    pygame.display.set_caption("CMPE Training Debug Viewer")
+    font = pygame.font.SysFont("monospace", 16)
+
+    # -----------------------------
     # 4) Visualizer
     # -----------------------------
     visualizer = PygameVisualizer()
@@ -111,13 +143,21 @@ if __name__ == "__main__":
             # Reset RLHandler per-episode state (keep replay buffer)
             rl.reset(clear_buffer=False)
 
+            # Per-episode logging
+            episode_reward = 0.0
+            video_frames = []
+
             for step_in_ep in range(1, max_steps_per_episode + 1):
                 global_step += 1
 
-                # 1) RL step
+                # 1) RL step: read obs, log transition, choose & apply new actions
                 obs, act, rew, done = rl.step()
+                # obs:  (N, CMPE_OBS_DIM)
+                # act:  (N, 3)
+                # rew:  (N,) or None on the very first ever step
+                # done: (N,) or None on the very first ever step
 
-                # Debug print (optional)
+                # Debug print (you can comment this out if too noisy)
                 print(
                     f"[train_CMPE] ep {ep} | step {step_in_ep} "
                     f"| obs shape: {obs.shape}, act shape: {act.shape}"
@@ -127,98 +167,117 @@ if __name__ == "__main__":
                 if config.get_if_route_planning():
                     world.manager.visualize_path()
 
-                # 2) DQN training step
+                # 2) RL update from replay buffer (once we have rewards)
                 if rew is not None:
-                    policy.train_step(rl.buffer)
+                    # Accumulate reward for logging (first controlled agent)
+                    if rew.shape[0] > 0:
+                        episode_reward += float(rew[0])
 
-                    # Early episode termination if all controlled agents done
+                    # One DQN update step from replay buffer (if we use local DQN)
+                    if isinstance(policy, DQNPolicy):
+                        policy.train_step(rl.buffer)
+
+                    # If all controlled agents are done, end the episode
                     if np.all(done):
                         print(
                             f"[train_CMPE] Episode {ep} finished early at "
                             f"step {step_in_ep} (all agents done)."
                         )
-                        # we still want one last visualization before break
-                        # so don't break yet, just mark and handle after vis if you want
-                        episode_done_here = True
-                    else:
-                        episode_done_here = False
-                else:
-                    episode_done_here = False
+                        break
 
-                # 3) Visualization (top-down camera + ego obs + info)
-                ego_rgb = None
-                ego_obs_vec = None
-                last_reward_ego = 0.0
+                # 3) Pygame visualization: camera + text
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        raise KeyboardInterrupt
 
-                # Controlled vehicle 0
+                screen.fill((0, 0, 0))
+
+                # --- 3a) Try to get forward-facing camera from controlled agent 0 ---
+                ego_cam_rgb = None
                 if len(world.manager.controlled_agents) > 0:
                     ego_agent = world.manager.controlled_agents[0]
-                    if ego_agent is not None and getattr(ego_agent, "vehicle", None) is not None:
-                        # Top-down image
-                        ego_rgb = ego_agent.get_forward_latest()
+                    if (
+                        ego_agent is not None
+                        and getattr(ego_agent, "vehicle", None) is not None
+                        and hasattr(ego_agent, "get_forward_latest")
+                    ):
+                        ego_cam_rgb = ego_agent.get_forward_latest()
 
-                        # Ego CMPE obs (10D)
-                        ego_obs_vec = world.manager.get_agent_cmpe_style_obs(ego_agent)
+                text_x = 10  # default text x offset
 
-                if rew is not None and rew.shape[0] > 0:
-                    last_reward_ego = float(rew[0])
+                if ego_cam_rgb is not None:
+                    # ego_cam_rgb expected shape: (H, W, 3) uint8
+                    cam_array = np.asarray(ego_cam_rgb, dtype=np.uint8)
+                    h, w, _ = cam_array.shape
 
-                # Build text lines for the right panel
-                text_lines = [
+                    # Pygame wants (W, H, 3)
+                    cam_surface = pygame.surfarray.make_surface(cam_array.swapaxes(0, 1))
+
+                    # Scale to fit left portion of the 800x600 window
+                    # e.g. 512x384
+                    cam_surface = pygame.transform.scale(cam_surface, (512, 384))
+
+                    # Blit at top-left
+                    screen.blit(cam_surface, (0, 0))
+
+                    # Shift text to the right of the camera
+                    text_x = 520
+
+                # --- 3b) Build text lines ---
+                lines = [
                     f"Episode: {ep}",
                     f"Step in episode: {step_in_ep}",
                     f"Global step: {global_step}",
-                    f"Last reward [ego]: {last_reward_ego:.3f}",
-                    "",
-                    "Ego CMPE obs (10D):",
+                    f"Episode reward (agent 0): {episode_reward:.3f}",
                 ]
+                if rew is not None and rew.shape[0] > 0:
+                    lines.append(f"Reward[0] this step: {float(rew[0]):.3f}")
 
-                if ego_obs_vec is not None:
-                    # Your get_agent_cmpe_style_obs docstring says:
-                    # [speed_norm,
-                    #  heading_err_norm,
-                    #  dist_to_goal_norm,
-                    #  lateral_norm,
-                    #  collision_flag,
-                    #  lane_invasion_flag,
-                    #  traffic_light_red_flag,
-                    #  at_junction_flag,
-                    #  throttle_prev,
-                    #  steer_prev]
-                    names = [
-                        "speed_norm",
-                        "heading_err_norm",
-                        "dist_to_goal_norm",
-                        "lateral_norm",
-                        "collision_flag",
-                        "lane_invasion_flag",
-                        "traffic_light_red_flag",
-                        "at_junction_flag",
-                        "throttle_prev",
-                        "steer_prev",
-                    ]
-                    for name, val in zip(names, ego_obs_vec.tolist()):
-                        text_lines.append(f"  {name}: {val:.3f}")
-                else:
-                    text_lines.append("  <no ego obs>")
+                # Show first few ego obs entries for controlled agent 0
+                if obs.shape[0] > 0:
+                    ego_obs = obs[0]
+                    lines.append("Ego obs[0..9]:")
+                    for i in range(min(len(ego_obs), 10)):
+                        lines.append(f"  o[{i}] = {ego_obs[i]: .3f}")
 
-                # Render in pygame (handles events internally)
+                y = 10
+                for line in lines:
+                    text_surface = font.render(line, True, (255, 255, 255))
+                    screen.blit(text_surface, (text_x, y))
+                    y += 20
+
+                pygame.display.flip()
+
+
+                # 4) Capture the current Pygame window into the episode video buffer
+                frame_surface = pygame.display.get_surface()
+                if frame_surface is not None:
+                    frame_array = pygame.surfarray.array3d(frame_surface)  # (W, H, 3)
+                    frame_array = np.transpose(frame_array, (1, 0, 2))      # (H, W, 3)
+                    video_frames.append(frame_array)
+
+                # 5) Advance the CARLA world one tick
+                world.tick()
+
+            # End of one episode
+            # Save episode video
+            if len(video_frames) > 0:
+                video_path = videos_dir / f"episode_{ep:04d}.mp4"
                 try:
-                    visualizer.render(ego_rgb, text_lines)
-                except KeyboardInterrupt:
-                    # Closing the window or pressing ESC will bubble up
-                    raise
+                    imageio.mimsave(video_path, video_frames, fps=20)
+                    print(f"[train_CMPE] Saved video for episode {ep} to {video_path}")
+                except Exception as e:
+                    print(f"[train_CMPE] Failed to save video for episode {ep}: {e}")
 
-                # 4) Advance CARLA world
-                world.tick()
+            # Save policy every 10 episodes if we are using local DQN
+            if isinstance(policy, DQNPolicy) and (ep % 10 == 0):
+                policy_path = policies_dir / f"dqn_policy_ep{ep:04d}.pt"
+                try:
+                    policy.save(str(policy_path))
+                    print(f"[train_CMPE] Saved DQN policy at episode {ep} to {policy_path}")
+                except Exception as e:
+                    print(f"[train_CMPE] Failed to save policy at episode {ep}: {e}")
 
-                # If we flagged early episode termination, break now
-                if episode_done_here:
-                    break
-
-
-                # 3) Advance the CARLA world one tick
-                world.tick()
 
     except KeyboardInterrupt:
         print("[train_CMPE] Stopping via KeyboardInterrupt...")
