@@ -3,8 +3,12 @@
 import numpy as np
 from typing import Optional, Callable, Any, Sequence, List, Dict
 import torch
+
+# Temporary constants
 STEER_BINS = np.linspace(-np.pi, np.pi, 13)   # 13 values
 ACCEL_BINS = np.array([-4.0, -2.6, -1.3, 0.0, 1.3, 2.6, 4.0])  # 7 values
+CMPE_OBS_DIM = 10  # or 12, whatever we define below
+
 
 class SimpleReplayBuffer:
     """
@@ -75,9 +79,9 @@ class RLHandler:
         action_dim : # of action components per agent (throttle, steer, brake → 3)
         replay_capacity : max transitions in buffer
         policy : optional callable(obs_batch) -> actions_batch
-                 obs_batch: (N, num_points, 3)
-                 returns:   (N, action_dim)
-                 If None, a simple default policy is used.
+        obs_batch: (N, CMPE_OBS_DIM)
+        returns:   (N,) discrete actions or (N, action_dim)
+
         """
         self.manager = manager
         self.action_dim = int(action_dim)
@@ -114,8 +118,8 @@ class RLHandler:
             dones    : np.ndarray, shape (N,) or None on the very first call
         """
         # 1) Get current obs from all controlled agents (GPUDrive-style)
-        obs_t = self._get_gpudrive_obs_from_manager()  # (num_agents, obs_dim) # This is only used when GPUDrive is needed
-        #obs_t = self._get_cmpe_obs_from_manager()
+        #obs_t = self._get_gpudrive_obs_from_manager()  # (num_agents, obs_dim) # This is only used when GPUDrive is needed
+        obs_t = self._get_cmpe_obs_from_manager()
 
         rewards = None
         dones = None
@@ -192,40 +196,44 @@ class RLHandler:
 
         return obs_t, actions_t, rewards, dones
     
-    def _get_cmpe_obs_from_manager(self) -> np.array:
+    def _get_cmpe_obs_from_manager(self) -> np.ndarray:
         """
         Build a batch of CMPE-style obs for all controlled agents.
 
         Assumes your Manager has:
-            get_cmpe_style_obs(agent) -> torch.Tensor or np.ndarray
-        that returns a (N,) vector per agent (proprioception + front camera + ).
+            get_cmpe_style_obs(agent, destination) -> torch.Tensor or np.ndarray
+        that returns a (CMPE_OBS_DIM,) vector per agent.
         """
         obs_list = []
         for agent in self.manager.controlled_agents:
             # If agent is dead / missing vehicle → just zero obs
             if agent is None or getattr(agent, "vehicle", None) is None:
-                obs_vec = np.zeros(N, dtype=np.float32)  # adjust if obs_dim changes #TODO: fill in the obs space 
+                obs_vec = np.zeros(CMPE_OBS_DIM, dtype=np.float32)
                 obs_list.append(obs_vec)
                 continue
 
-            obs = self.manager.get_gpudrive_style_obs(agent, agent.destination)
+            obs = self.manager.get_agent_cmpe_style_obs(agent)
+
             # Handle torch or numpy
-            try:
-                import torch
-                if isinstance(obs, torch.Tensor):
-                    obs_vec = obs.detach().cpu().numpy()
-                else:
-                    obs_vec = np.asarray(obs, dtype=np.float32)
-            except ImportError:
+            if isinstance(obs, torch.Tensor):
+                obs_vec = obs.detach().cpu().numpy().astype(np.float32)
+            else:
                 obs_vec = np.asarray(obs, dtype=np.float32)
+
+            # Safety: enforce correct dim
+            if obs_vec.shape != (CMPE_OBS_DIM,):
+                raise ValueError(
+                    f"get_cmpe_style_obs must return shape ({CMPE_OBS_DIM},), got {obs_vec.shape}"
+                )
 
             obs_list.append(obs_vec)
 
         if len(obs_list) == 0:
-            return np.zeros((0, 2984), dtype=np.float32)
+            return np.zeros((0, CMPE_OBS_DIM), dtype=np.float32)
 
-        obs_batch = np.stack(obs_list, axis=0)  # (N, obs_dim)
+        obs_batch = np.stack(obs_list, axis=0)  # (N, CMPE_OBS_DIM)
         return obs_batch
+
 
     def _get_gpudrive_obs_from_manager(self) -> np.ndarray:
         """
@@ -266,41 +274,67 @@ class RLHandler:
     
     def decode_discrete_action(self, discrete_action: np.ndarray) -> np.ndarray:
         """
-        Converts discrete GPUDrive action(s) into CARLA continuous control:
+        Converts discrete GPUDrive-style action(s) into CARLA continuous control:
             throttle, steer, brake
 
-        discrete_action: shape () for 1 agent or (N,)
-        returns: (N, 3)
+        discrete_action:
+            - scalar: single action
+            - or array-like shape (N,) for N agents
+
+        Returns:
+            actions: np.ndarray, shape (N, 3)
         """
-        act = np.asarray(discrete_action)
+        # Convert to 1D int array
+        act = np.asarray(discrete_action, dtype=np.int64)
 
-        # Case 1: scalar → convert to (1,)
+        # Case 1: scalar → reshape to (1,)
         if act.ndim == 0:
-            act = np.array([act.item()], dtype=np.int64)
+            act = act.reshape(1)
 
-        # Shape (N,)
-        N = act.shape[0]
+        # Now act.shape == (N,)
+        num_steer = STEER_BINS.shape[0]   # 13
+        num_accel = ACCEL_BINS.shape[0]   # 7
+        num_actions = num_steer * num_accel
 
-        # Steering index: integer in [0, 12] #NOTE: Yicheng tried another way around for decoding
-        #steer_idx = int(act // len(ACCEL_BINS)) 
-        steer_idx = int(act % len(STEER_BINS))
+        # Optional safety check
+        if np.any(act < 0) or np.any(act >= num_actions):
+            raise ValueError(
+                f"Discrete action out of range [0, {num_actions}): {act}"
+            )
 
-        # Acceleration index: integer in [0, 6]
-        #accel_idx = int(act % len(ACCEL_BINS))
-        accel_idx = int(act // len(STEER_BINS))
+        # Vectorized indices
+        steer_idx = act % num_steer        # shape (N,)
+        accel_idx = act // num_steer       # shape (N,)
 
-        # Map to actual continuous values
-        steer = STEER_BINS[steer_idx]              # radians
-        accel = ACCEL_BINS[accel_idx]              # m/s^2 roughly
+        # Map to actual values (broadcasted)
+        steer = STEER_BINS[steer_idx]      # (N,)
+        accel = ACCEL_BINS[accel_idx]      # (N,)
 
         # Convert accel → throttle/brake
-        throttle = np.clip(accel, 0, None) / 4.0   # scale 0..4 → 0..1
-        brake    = np.clip(-accel, 0, None) / 4.0  # scale -4..0 → 0..1
+        throttle = np.clip(accel, 0, None) / 4.0   # 0..1, shape (N,)
+        brake    = np.clip(-accel, 0, None) / 4.0  # 0..1, shape (N,)
 
         # Normalize steering from [-pi, pi] to [-1, 1]
-        steer_norm = steer / np.pi
+        steer_norm = steer / np.pi                 # (N,)
 
-        return np.stack([throttle, steer_norm, brake], axis=-1).astype(np.float32)
+        # Stack into (N, 3)
+        actions = np.stack([throttle, steer_norm, brake], axis=-1).astype(np.float32)
+        return actions
+
+    
+
+    def reset(self, clear_buffer: bool = False) -> None:
+        """
+        Reset per-episode state in the handler.
+        If clear_buffer=True, also empty the replay buffer.
+        """
+        self.last_obs = None
+        self.last_actions = None
+        self.step_count = 0
+        self.debug_history = []
+
+        if clear_buffer:
+            self.buffer = SimpleReplayBuffer(self.buffer.capacity)
 
     # --------------------------------------------------
     # Internals
@@ -347,21 +381,17 @@ class RLHandler:
             - off-road penalties, etc.
 
         Shapes:
-            obs_t   : (N, obs_dim)      # GPUDrive-style flat obs
+            obs_t    : (N, obs_dim)      # CMPE-style obs
             actions_t: (N, action_dim)
-            obs_tp1 : (N, obs_dim)
-
+            obs_tp1  : (N, obs_dim)
 
         Returns:
             rewards : (N,)
             dones   : (N,)
         """
         num_agents = obs_t.shape[0]
-        print(num_agents)
         rewards = np.zeros(num_agents, dtype=np.float32)
         dones = np.zeros(num_agents, dtype=bool)
-        print('checking the rewards')
-        print('checking done')
         rewards, dones = self.manager.get_rewards_and_dones()
 
         return rewards, dones

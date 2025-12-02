@@ -162,6 +162,140 @@ class Manager:
 
         return obs.astype(np.float32)
     
+    def get_agent_cmpe_style_obs(self, agent) -> np.ndarray:
+        """
+        Low-dim CMPE observation for one agent.
+
+        Returns a 10D vector:
+            [speed_norm,
+             heading_err_norm,
+             dist_to_goal_norm,
+             lateral_norm,
+             collision_flag,
+             lane_invasion_flag,
+             traffic_light_red_flag,
+             at_junction_flag,
+             throttle_prev,
+             steer_prev]
+        """
+        # If agent is dead / missing vehicle → zeros
+        if agent is None or getattr(agent, "vehicle", None) is None:
+            return np.zeros(10, dtype=np.float32)
+
+        vehicle: carla.Vehicle = agent.vehicle
+        world = self.world
+        amap = world.get_map()
+
+        # ------------------------------------------------------------------
+        # 1) Speed (normalize by 30 m/s)
+        # ------------------------------------------------------------------
+        vel = vehicle.get_velocity()
+        speed = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
+        speed_norm = float(np.clip(speed / 30.0, 0.0, 1.0))
+
+        # ------------------------------------------------------------------
+        # 2) Heading error vs lane direction (in [-1, 1])
+        # ------------------------------------------------------------------
+        tf = vehicle.get_transform()
+        loc = tf.location
+        yaw_rad = math.radians(tf.rotation.yaw)
+
+        wp = amap.get_waypoint(
+            loc,
+            project_to_road=True,
+            lane_type=carla.LaneType.Driving
+        )
+
+        lane_yaw_rad = math.radians(wp.transform.rotation.yaw)
+        heading_err = yaw_rad - lane_yaw_rad
+        # wrap to [-pi, pi]
+        heading_err = (heading_err + math.pi) % (2.0 * math.pi) - math.pi
+        heading_err_norm = float(heading_err / math.pi)  # [-1, 1]
+
+        # ------------------------------------------------------------------
+        # 3) Distance to goal (normalized by 100 m)
+        # ------------------------------------------------------------------
+        # assumes your Controlled_Agents has .destination as a carla.Location
+        goal_location: carla.Location = getattr(agent, "destination", loc)
+        dx = float(goal_location.x) - float(loc.x)
+        dy = float(goal_location.y) - float(loc.y)
+        dist_to_goal = math.sqrt(dx * dx + dy * dy)
+        dist_to_goal_norm = float(np.clip(dist_to_goal / 100.0, 0.0, 1.0))
+
+        # ------------------------------------------------------------------
+        # 4) Lateral offset from lane center ([-1, 1])
+        # ------------------------------------------------------------------
+        lane_tf = wp.transform
+        lane_loc = lane_tf.location
+        dx_lane = float(loc.x) - float(lane_loc.x)
+        dy_lane = float(loc.y) - float(lane_loc.y)
+
+        lane_yaw = math.radians(lane_tf.rotation.yaw)
+        # lane forward
+        fx = math.cos(lane_yaw)
+        fy = math.sin(lane_yaw)
+        # lane right (perp)
+        rx = -fy
+        ry = fx
+        lateral = dx_lane * rx + dy_lane * ry  # right-positive
+
+        # approximate half-lane width (2 m); adjust if you want
+        lateral_norm = float(np.clip(lateral / 2.0, -1.0, 1.0))
+
+        # ------------------------------------------------------------------
+        # 5) Collision & lane invasion flags
+        # ------------------------------------------------------------------
+        # you should set these in Controlled_Agents sensor callbacks
+        collision_flag = 1.0 if getattr(agent, "had_collision", False) else 0.0
+        lane_inv_flag = 1.0 if getattr(agent, "had_lane_invasion", False) else 0.0
+
+        # ------------------------------------------------------------------
+        # 6) Traffic light state
+        # ------------------------------------------------------------------
+        traffic_light_red_flag = 0.0
+        at_junction_flag = 0.0
+
+        tl = vehicle.get_traffic_light()
+        if tl is not None:
+            at_junction_flag = 1.0
+            if tl.get_state() == carla.TrafficLightState.Red:
+                traffic_light_red_flag = 1.0
+
+        # ------------------------------------------------------------------
+        # 7) Previous control (throttle, steer)
+        # ------------------------------------------------------------------
+        ctrl = getattr(agent, "last_control", None)
+        throttle_prev = 0.0
+        steer_prev = 0.0
+
+        if ctrl is not None:
+            # support both dict and object-with-attributes
+            if isinstance(ctrl, dict):
+                throttle_prev = float(ctrl.get("throttle", 0.0))
+                steer_prev = float(ctrl.get("steer", 0.0))
+            else:
+                throttle_prev = float(getattr(ctrl, "throttle", 0.0))
+                steer_prev = float(getattr(ctrl, "steer", 0.0))
+
+        obs = np.array(
+            [
+                speed_norm,
+                heading_err_norm,
+                dist_to_goal_norm,
+                lateral_norm,
+                collision_flag,
+                lane_inv_flag,
+                traffic_light_red_flag,
+                at_junction_flag,
+                throttle_prev,
+                steer_prev,
+            ],
+            dtype=np.float32,
+        )
+
+        return obs
+
+    
     def get_agent_roadgraph_obs(self, agent) -> torch.Tensor:
         """
         Build a (200, 13) GPUDrive-style roadgraph obs for this agent,
@@ -337,10 +471,24 @@ class Manager:
             if agent is None or agent.vehicle is None:
                 continue
             try:
-                #print(f'now applying {act} to {agent}')
-                agent.apply_action(act)
+                # ensure it's a 3-tuple
+                throttle = float(act[0])
+                steer    = float(act[1])
+                brake    = float(act[2])
+
+                # store last_control so CMPE obs can read it
+                agent.last_control = {
+                    "throttle": throttle,
+                    "steer": steer,
+                    "brake": brake,
+                }
+
+                # actually apply control using your existing helper
+                agent.apply_action((throttle, steer, brake))
+
             except Exception as e:
                 print("[Manager] Error applying action to agent {}: {}".format(agent.index, e))
+
 
 
     def get_controlled_lidar_observations(
@@ -433,6 +581,25 @@ class Manager:
     # --------------------------------------------------
     # Cleanup & removal
     # --------------------------------------------------
+
+    def reset_episode(self) -> None:
+        """
+        Destroy all existing agents and respawn fresh controlled + free agents.
+        """
+        # 1) Destroy current agents
+        self.cleanup()
+
+        # 2) Clear per-episode containers
+        self.agents = []
+        self.active_flags = []
+        self.controlled_agents = []
+        self.free_agents = []
+        self.vehicle_to_index = {}
+
+        # 3) Respawn with original headcounts
+        nc, nf = self.config.get_headcounts()
+        self.spawn_both_controlled_and_free(nc, nf)
+
     def cleanup(self) -> None:
         """
         Destroy all vehicles and sensors (by calling destroy_agent() of each agent),

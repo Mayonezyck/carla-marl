@@ -13,7 +13,7 @@ experiment:
     search_radius: 50
     search_n_points: 200
 
-  controlled_count: 1
+  controlled_count: 2
   route_planning_enable: True
   sensorless_free_agent: True #False for CMPE assignment data collections
   free_count: 10

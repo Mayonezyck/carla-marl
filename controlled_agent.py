@@ -43,6 +43,9 @@ class Controlled_Agents(Agent):
         self._lidar_queue: "queue.Queue[tuple[int, carla.LidarMeasurement]]" = queue.Queue()
         self._last_lidar: tuple[int, carla.LidarMeasurement] | None = None
         self._collision_event = [] #I use a list to record the events, should I just cache one?
+        self._had_collision = False
+        self.had_lane_invasion = False
+        self.last_control = None
         self._fatal_collision = False #Currently this will log any collision as fatal, later can be tweeked to check only significant events (e.g. collision with vehicle/ped)
         # Initialize start/end and plan a route
         if self.config.get_if_route_planning() and self.vehicle is not None:
@@ -57,7 +60,9 @@ class Controlled_Agents(Agent):
                     self.destination
                 )
                 self._route_debug_enabled = True
-        
+
+        self._lane_invasion_events: list[carla.LaneInvasionEvent] = []
+        self.had_lane_invasion = False
         self._add_other_sensors()
         self._setup_sensors_from_config()
         
@@ -74,12 +79,27 @@ class Controlled_Agents(Agent):
             impulse = event.normal_impulse  # carla.Vector3D
             intensity = (impulse.x**2 + impulse.y**2 + impulse.z**2)**0.5
             self._collision_event.append(event)
+            self._had_collision = True
             if _check_fatal(event):
                 self._fatal_collision = True
             print(f"[COLLISION] with {actor_we_collided_with.type_id}, intensity={intensity:.2f}")
         
         collision_sensor.listen(collision_callback)
         self.sensors.append(collision_sensor)
+
+        lane_inv_sensor = self._add_lane_invasion_sensor()
+
+        def lane_inv_callback(event: carla.LaneInvasionEvent):
+            self._lane_invasion_events.append(event)
+            self.had_lane_invasion = True
+
+            # Optional debug
+            types = [str(marking.type) for marking in event.crossed_lane_markings]
+            print(f"[LANE INVASION] crossed: {types}")
+
+        lane_inv_sensor.listen(lane_inv_callback)
+        self.sensors.append(lane_inv_sensor)
+
         
     def _add_collision_sensor(self) -> None:
         blueprint_library = self.world.get_blueprint_library()
@@ -101,6 +121,23 @@ class Controlled_Agents(Agent):
         )
         return collision_sensor
             
+    def _add_lane_invasion_sensor(self) -> carla.Actor:
+        blueprint_library = self.world.get_blueprint_library()
+        lane_inv_bp = blueprint_library.find('sensor.other.lane_invasion')
+
+        transform = carla.Transform(
+            carla.Location(x=0.0, y=0.0, z=2.0),
+            carla.Rotation()
+        )
+
+        lane_inv_sensor = self.world.spawn_actor(
+            lane_inv_bp,
+            transform,
+            attach_to=self.vehicle
+        )
+        return lane_inv_sensor
+
+    
 
     def _setup_sensors_from_config(self) -> None:
         sensors_cfg = self.config.get_sensor_type()
@@ -141,6 +178,10 @@ class Controlled_Agents(Agent):
         )
         self.vehicle.apply_control(control)
 
+    @property
+    def had_collision(self) -> bool:
+        return self._had_collision
+    
     def get_fatal_flag(self) -> bool:
         return self._fatal_collision
 

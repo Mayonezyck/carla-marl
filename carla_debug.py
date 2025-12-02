@@ -2,7 +2,7 @@ import pickle
 import numpy as np
 import matplotlib.pyplot as plt
 
-with open("carla_debug.pkl", "rb") as f:
+with open("debug_ep_3.pkl", "rb") as f:
     data = pickle.load(f)
 
 steps = data["steps"]                       # (T,)
