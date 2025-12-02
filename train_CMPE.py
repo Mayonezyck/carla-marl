@@ -29,9 +29,9 @@ import imageio
 import pygame
 
 # --------- DQN training hyperparams ----------
-LEARNING_START = 5_000      # replay size before we start learning
-TRAIN_EVERY    = 4          # gradient step every N env steps
-GRAD_UPDATES_PER_CALL = 1   # how many batches per train_step call
+LEARNING_START = 2_000      # replay size before we start learning
+TRAIN_EVERY    = 32          # gradient step every N env steps
+GRAD_UPDATES_PER_CALL = 16   # how many batches per train_step call
 
 
 
@@ -194,6 +194,7 @@ if __name__ == "__main__":
                     # DQN update from replay buffer with warmup + periodic updates
                     if isinstance(policy, DQNPolicy):
                         if len(rl.buffer) >= LEARNING_START and (global_step % TRAIN_EVERY == 0):
+                            print('Now updating the policy')
                             for _ in range(GRAD_UPDATES_PER_CALL):
                                 policy.train_step(rl.buffer)
 
@@ -319,10 +320,37 @@ if __name__ == "__main__":
                         lines.append(f"  o[{i}] = {ego_obs[i]: .3f}")
 
                 text_y = 380
+                # 1) Plain info (white)
                 for line in lines:
                     text_surface = font.render(line, True, (255, 255, 255))
                     screen.blit(text_surface, (10, text_y))
                     text_y += 20
+
+                # 2) Reward / penalty events for controlled agent 0
+                if len(world.manager.controlled_agents) > 0:
+                    ego_agent = world.manager.controlled_agents[0]
+                    events = getattr(ego_agent, "last_reward_events", [])
+
+                    if events:
+                        # small header
+                        header_surface = font.render("Events this step:", True, (200, 200, 200))
+                        screen.blit(header_surface, (10, text_y))
+                        text_y += 20
+
+                        for ev in events:
+                            ev_str = str(ev).strip()
+                            # decide color based on sign
+                            if ev_str.startswith("+"):
+                                color = (0, 255, 0)    # green for rewards
+                            elif ev_str.startswith("-"):
+                                color = (255, 0, 0)    # red for penalties
+                            else:
+                                color = (200, 200, 200)
+
+                            ev_surface = font.render(ev_str, True, color)
+                            screen.blit(ev_surface, (20, text_y))
+                            text_y += 20
+
 
                 pygame.display.flip()
 

@@ -15,8 +15,8 @@ import queue
 MAX_SPEED = 100.0
 MAX_VEH_LEN = 30.0
 MAX_VEH_WIDTH = 15.0
-MIN_REL_GOAL_COORD = -1000.0
-MAX_REL_GOAL_COORD = 1000.0
+MIN_REL_GOAL_COORD = -200.0
+MAX_REL_GOAL_COORD = 200.0
 SEG_DEPTH_H = 128
 SEG_DEPTH_W = 128
 CMPE_OBS_DIM = 10 + 2 * SEG_DEPTH_H * SEG_DEPTH_W
@@ -672,6 +672,7 @@ class Manager:
                 agent.prev_dist_to_goal = dist
 
                 r = 0.0
+                events = []
                 # reward for progress
                 r += 1.0 * progress
 
@@ -698,13 +699,16 @@ class Manager:
                         # Reached the final goal
                         r += FINAL_REWARD
                         done = True
+                        events.append("+100.00 goal reached")
 
                 # ------------------------------------------------------------------
                 # Collision penalty (using your fatal flag)
                 # ------------------------------------------------------------------
                 if agent.get_fatal_flag():
-                    r -= 100.0
+                    r -= 50.0
                     done = True
+                    events.append("-50.00 collision")
+                    print('Yo fatal flag triggered, -50 for this.')
                     # Remove this agent (vehicle + sensors) from the world
                     self.remove_agent(agent)
 
@@ -713,27 +717,33 @@ class Manager:
                 # ------------------------------------------------------------------
                 lane_inv_flag = bool(getattr(agent, "had_lane_invasion", False))
                 if lane_inv_flag:
-                    r -= 5.0
+                    r -= 50.0
+                    done = True
+                    events.append("-50.00  lane invasion")
+                    print('Lane invasion, no good, -5')
                     agent.had_lane_invasion = False  
+                    self.remove_agent(agent)
 
                 # ------------------------------------------------------------------
                 # Red-light violation penalty
                 #   - simple: penalize moving faster than 0.5 m/s on red
                 # ------------------------------------------------------------------
-                vel = vehicle.get_velocity()
-                speed = float(np.sqrt(vel.x**2 + vel.y**2 + vel.z**2))
+                # vel = vehicle.get_velocity()
+                # speed = float(np.sqrt(vel.x**2 + vel.y**2 + vel.z**2))
 
-                tl = vehicle.get_traffic_light()
-                if tl is not None and tl.get_state() == carla.TrafficLightState.Red:
-                    if speed > 0.5:
-                        r -= 40.0
-                        # If you want, you *could* also terminate here:
-                        # done = True
+                # tl = vehicle.get_traffic_light()
+                # if tl is not None and tl.get_state() == carla.TrafficLightState.Red:
+                #     if speed > 0.5:
+                #         r -= 20.0
+                #         print('Somehow this -20 is triggered, WTF')
+                #         # If you want, you *could* also terminate here:
+                #         # done = True
 
                 # ------------------------------------------------------------------
                 # Small per-step time penalty
                 # ------------------------------------------------------------------
-                r -= 0.01
+                r -= 0.05
+                agent.last_reward_events = events
 
                 rewards[i] = float(r)
                 dones[i] = done
