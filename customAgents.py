@@ -42,6 +42,7 @@ class Agent:
     def _spawn_vehicle(self) -> None:
         blueprint_library = self.world.get_blueprint_library()
         vehicle_blueprints = blueprint_library.filter("vehicle.*")
+        
 
         if not vehicle_blueprints:
             raise RuntimeError("[Agent] No vehicle blueprints found.")
@@ -58,6 +59,8 @@ class Agent:
 
         while attempts < max_attempts and vehicle is None:
             bp = random.choice(vehicle_blueprints)
+            if self.role_prefix == 'controlled_agent': # force controlled agents to be model 3
+                bp = blueprint_library.find("vehicle.tesla.model3")
             # Random color if available
             if bp.has_attribute("color"):
                 color = random.choice(bp.get_attribute("color").recommended_values)
