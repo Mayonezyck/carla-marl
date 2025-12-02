@@ -57,6 +57,8 @@ class Manager:
         self.sensorlessFreeAgent = self.config.get_if_free_agent_sensorless()
         self.free_agents: List[Free_Agents] = []
         
+        # Reward Stage 
+        self.reward_stage = config.get_reward_stage()
 
         # Map vehicle.id -> index in self.agents for quick lookup
         self.vehicle_to_index: Dict[int, int] = {}
@@ -306,9 +308,14 @@ class Manager:
         if prev_ctrl is None:
             throttle_prev = 0.0
             steer_prev = 0.0
+        elif isinstance(prev_ctrl, dict):
+            throttle_prev = float(prev_ctrl.get("throttle", 0.0))
+            steer_prev = float(prev_ctrl.get("steer", 0.0))
         else:
-            throttle_prev = float(prev_ctrl.throttle)
-            steer_prev = float(prev_ctrl.steer)
+            # Fallback if you ever store a real carla.VehicleControl
+            throttle_prev = float(getattr(prev_ctrl, "throttle", 0.0))
+            steer_prev = float(getattr(prev_ctrl, "steer", 0.0))
+
 
         core_obs = np.array(
             [
@@ -329,7 +336,7 @@ class Manager:
         # ------------------------------------------------------------------
         # 7) Append seg + depth images (128x128 each)
         # ------------------------------------------------------------------
-        # Latest segmentation (H, W) int IDs
+        # Latest segmentation (H, W) int IDs / colors and depth (H, W) floats
         seg = agent.get_seg_latest() if hasattr(agent, "get_seg_latest") else None
         depth = agent.get_depth_latest() if hasattr(agent, "get_depth_latest") else None
 
@@ -338,26 +345,31 @@ class Manager:
             seg_flat = np.zeros(SEG_DEPTH_H * SEG_DEPTH_W, dtype=np.float32)
             depth_flat = np.zeros(SEG_DEPTH_H * SEG_DEPTH_W, dtype=np.float32)
         else:
-            # Ensure correct shape
-            seg = np.asarray(seg)
-            depth = np.asarray(depth, dtype=np.float32)
+            # Ensure numpy arrays with known dtypes
+            seg = np.asarray(seg, dtype=np.uint8)      # (H, W) in [0, 255]
+            depth = np.asarray(depth, dtype=np.float32)  # (H, W) depth in meters
 
-            # Resize / crop if dimensions differ (optional; here we just assert)
-            assert seg.shape == (SEG_DEPTH_H, SEG_DEPTH_W), f"seg shape {seg.shape} != {(SEG_DEPTH_H, SEG_DEPTH_W)}"
-            assert depth.shape == (SEG_DEPTH_H, SEG_DEPTH_W), f"depth shape {depth.shape} != {(SEG_DEPTH_H, SEG_DEPTH_W)}"
+            # Check shapes match what the CNN expects
+            assert seg.shape == (SEG_DEPTH_H, SEG_DEPTH_W), \
+                f"seg shape {seg.shape} != {(SEG_DEPTH_H, SEG_DEPTH_W)}"
+            assert depth.shape == (SEG_DEPTH_H, SEG_DEPTH_W), \
+                f"depth shape {depth.shape} != {(SEG_DEPTH_H, SEG_DEPTH_W)}"
 
-            # Normalize segmentation IDs to [0, 1] (assume IDs in [0, 23] or [0, 255])
-            seg_norm = seg.astype(np.float32) / 255.0
+            # --- Segmentation normalization ---
+            # Assuming CARLA’s seg image is already in [0, 255] (palette/colors),
+            # scale to [0, 1] for the CNN.
+            seg_norm = seg.astype(np.float32) / 255.0    # → [0, 1]
 
-            # Depth: clip to [0, 100] m and normalize to [0, 1]
-            depth_clipped = np.clip(depth, 0.0, 100.0)
-            depth_norm = depth_clipped / 100.0
+            # --- Depth normalization ---
+            # Clip to [0, 100] meters and scale to [0, 1].
+            depth_cap = 100.0
+            depth_clipped = np.clip(depth, 0.0, depth_cap)
+            depth_norm = depth_clipped / depth_cap       # → [0, 1]
 
-            seg_flat = seg_norm.flatten().astype(np.float32)
-            depth_flat = depth_norm.flatten().astype(np.float32)
+            seg_flat = seg_norm.reshape(-1).astype(np.float32)
+            depth_flat = depth_norm.reshape(-1).astype(np.float32)
 
         full_obs = np.concatenate([core_obs, seg_flat, depth_flat], axis=0)
-        # Safety check
         if full_obs.shape[0] != CMPE_OBS_DIM:
             raise ValueError(
                 f"CMPE obs dim mismatch: got {full_obs.shape[0]}, expected {CMPE_OBS_DIM}"
@@ -627,6 +639,13 @@ class Manager:
                 rewards[i] = 0.0
                 continue
 
+            # If this agent already finished (reached final goal earlier),
+            # treat as done with zero reward from now on.
+            if getattr(agent, "reached_final_goal", False):
+                dones[i] = True
+                rewards[i] = 0.0
+                continue
+
             # Some vehicles may already be destroyed by CARLA.
             # Any call on them (get_transform, get_velocity, etc.)
             # will raise RuntimeError. We catch that and mark as done.
@@ -700,6 +719,11 @@ class Manager:
                         r += FINAL_REWARD
                         done = True
                         events.append("+100.00 goal reached")
+                        # Mark this agent as finished so we don't keep rewarding
+                        setattr(agent, "reached_final_goal", True)
+                        # Optional: reset distance baseline
+                        agent.prev_dist_to_goal = None
+                        self.remove_agent(agent)
 
                 # ------------------------------------------------------------------
                 # Collision penalty (using your fatal flag)
@@ -715,34 +739,37 @@ class Manager:
                 # ------------------------------------------------------------------
                 # Lane invasion penalty (no terminate by default)
                 # ------------------------------------------------------------------
+                # ------------- Lane invasion penalty by stage -------------
                 lane_inv_flag = bool(getattr(agent, "had_lane_invasion", False))
                 if lane_inv_flag:
-                    r -= 50.0
-                    done = True
-                    events.append("-50.00  lane invasion")
-                    print('Lane invasion, no good, -5')
-                    agent.had_lane_invasion = False  
-                    self.remove_agent(agent)
+                    if self.reward_stage == 1:
+                        # Stage 1: ignore lane, just clear the flag
+                        events.append("lane invasion (ignored in stage 1)")
+                        agent.had_lane_invasion = False
 
-                # ------------------------------------------------------------------
-                # Red-light violation penalty
-                #   - simple: penalize moving faster than 0.5 m/s on red
-                # ------------------------------------------------------------------
-                # vel = vehicle.get_velocity()
-                # speed = float(np.sqrt(vel.x**2 + vel.y**2 + vel.z**2))
+                    elif self.reward_stage == 2:
+                        # Stage 2: soft penalty, non-fatal
+                        r -= 10.0
+                        events.append("-10.00 lane invasion (stage 2)")
+                        agent.had_lane_invasion = False
 
-                # tl = vehicle.get_traffic_light()
-                # if tl is not None and tl.get_state() == carla.TrafficLightState.Red:
-                #     if speed > 0.5:
-                #         r -= 20.0
-                #         print('Somehow this -20 is triggered, WTF')
-                #         # If you want, you *could* also terminate here:
-                #         # done = True
+                    elif self.reward_stage >= 3:
+                        # Stage 3+: fatal penalty, remove agent
+                        r -= 50.0
+                        done = True
+                        events.append("-50.00 lane invasion (stage 3)")
+                        print('Lane invasion, fatal in stage 3')
+                        agent.had_lane_invasion = False
+                        self.remove_agent(agent)
 
-                # ------------------------------------------------------------------
-                # Small per-step time penalty
-                # ------------------------------------------------------------------
-                r -= 0.05
+                # ------------- Per-step time penalty by stage -------------
+                if self.reward_stage == 1:
+                    r -= 0.01
+                elif self.reward_stage == 2:
+                    r -= 0.015
+                else:  # stage 3+
+                    r -= 0.02
+
                 agent.last_reward_events = events
 
                 rewards[i] = float(r)

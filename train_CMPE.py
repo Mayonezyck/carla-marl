@@ -303,53 +303,84 @@ if __name__ == "__main__":
                         depth_surface = pygame.transform.scale(depth_surface, (320, 180))
                         screen.blit(depth_surface, (480, 180))
 
-                # --------- build and draw text ---------
-                lines = [
+                # --------- build and draw text (multi-column) ---------
+                info_lines = [
                     f"Episode: {ep}",
-                    f"Step in episode: {step_in_ep}",
-                    f"Global step: {global_step}",
-                    f"Episode reward (agent 0): {episode_reward:.3f}",
+                    f"Step: {step_in_ep}",
+                    f"Global: {global_step}",
+                    f"Ep reward[0]: {episode_reward:.3f}",
                 ]
                 if rew is not None and rew.shape[0] > 0:
-                    lines.append(f"Reward[0] this step: {float(rew[0]):.3f}")
+                    info_lines.append(f"Reward[0] step: {float(rew[0]):.3f}")
 
+                obs_lines = []
                 if obs.shape[0] > 0:
                     ego_obs = obs[0]
-                    lines.append("Ego obs[0..9]:")
-                    for i in range(min(len(ego_obs), 10)):
-                        lines.append(f"  o[{i}] = {ego_obs[i]: .3f}")
+                    # compress obs a bit so it fits
+                    obs_lines.append(
+                        "Ego obs[0..4]: " +
+                        ", ".join(f"{ego_obs[i]:.3f}" for i in range(min(len(ego_obs), 5)))
+                    )
+                    if len(ego_obs) > 5:
+                        obs_lines.append(
+                            "Ego obs[5..9]: " +
+                            ", ".join(f"{ego_obs[i]:.3f}" for i in range(5, min(len(ego_obs), 10)))
+                        )
 
-                text_y = 380
-                # 1) Plain info (white)
-                for line in lines:
-                    text_surface = font.render(line, True, (255, 255, 255))
-                    screen.blit(text_surface, (10, text_y))
-                    text_y += 20
-
-                # 2) Reward / penalty events for controlled agent 0
+                # Gather event strings (if any)
+                event_lines = []
                 if len(world.manager.controlled_agents) > 0:
                     ego_agent = world.manager.controlled_agents[0]
                     events = getattr(ego_agent, "last_reward_events", [])
+                    for ev in events:
+                        ev_str = str(ev).strip()
+                        event_lines.append(ev_str)
 
-                    if events:
-                        # small header
-                        header_surface = font.render("Events this step:", True, (200, 200, 200))
-                        screen.blit(header_surface, (10, text_y))
-                        text_y += 20
+                # ---- layout text in columns along the bottom ----
+                base_y = 380
+                line_h = 20
 
-                        for ev in events:
-                            ev_str = str(ev).strip()
-                            # decide color based on sign
-                            if ev_str.startswith("+"):
-                                color = (0, 255, 0)    # green for rewards
-                            elif ev_str.startswith("-"):
-                                color = (255, 0, 0)    # red for penalties
-                            else:
-                                color = (200, 200, 200)
+                # Left block: info + obs, packed in columns
+                left_block = info_lines + obs_lines
+                num_cols_left = 2          # how many columns to span horizontally
+                col_width_left = 380       # width per column in pixels
+                x0_left = 10
 
-                            ev_surface = font.render(ev_str, True, color)
-                            screen.blit(ev_surface, (20, text_y))
-                            text_y += 20
+                for idx, line in enumerate(left_block):
+                    col = idx % num_cols_left
+                    row = idx // num_cols_left
+                    x = x0_left + col * col_width_left
+                    y = base_y + row * line_h
+                    text_surface = font.render(line, True, (255, 255, 255))
+                    screen.blit(text_surface, (x, y))
+
+                # Right block: events (colored), also in columns
+                if event_lines:
+                    # small header
+                    header_surface = font.render("Events:", True, (200, 200, 200))
+                    screen.blit(header_surface, (10, base_y + 3 * line_h))
+
+                    # Put events under the header, starting from some offset
+                    events_y_offset = base_y + 4 * line_h
+                    num_cols_ev = 2
+                    col_width_ev = 380
+                    x0_ev = 10
+
+                    for idx, ev_str in enumerate(event_lines):
+                        col = idx % num_cols_ev
+                        row = idx // num_cols_ev
+                        x = x0_ev + col * col_width_ev
+                        y = events_y_offset + row * line_h
+
+                        if ev_str.startswith("+"):
+                            color = (0, 255, 0)
+                        elif ev_str.startswith("-"):
+                            color = (255, 0, 0)
+                        else:
+                            color = (200, 200, 200)
+
+                        ev_surface = font.render(ev_str, True, color)
+                        screen.blit(ev_surface, (x, y))
 
 
                 pygame.display.flip()

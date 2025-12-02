@@ -254,6 +254,11 @@ class RLHandler:
                 continue
 
             obs = self.manager.get_agent_cmpe_style_obs(agent)
+            print(obs[10:20].min(), obs[10:20].max())          # seg slice sample
+            print(obs[10 + SEG_DEPTH_H * SEG_DEPTH_W:
+                    10 + 2 * SEG_DEPTH_H * SEG_DEPTH_W].min())
+            print(obs[10 + SEG_DEPTH_H * SEG_DEPTH_W:
+                    10 + 2 * SEG_DEPTH_H * SEG_DEPTH_W].max())
 
             # Handle torch or numpy
             if isinstance(obs, torch.Tensor):

@@ -13,6 +13,7 @@ class ConfigLoader():
             self.port = cfg["carla"]["port"]
             self.policy = cfg["experiment"]["policy"]
             self.step_size = cfg["experiment"]["road_point_extractor"]["step_size"]
+            self.reward_stage = cfg["experiment"]["reward_stage"]
             self.search_radius = cfg["experiment"]["road_point_extractor"]["search_radius"]
             self.search_n_points = cfg["experiment"]["road_point_extractor"]["search_n_points"]
             self.ped_count = cfg["other"]["pedestrian_count"]
@@ -35,6 +36,8 @@ class ConfigLoader():
         return self.port
     def get_use_policy(self):
         return self.policy
+    def get_reward_stage(self):
+        return self.reward_stage
     def get_step_size(self):
         return self.step_size
     def get_search_radius(self):
