@@ -114,8 +114,8 @@ class RLHandler:
             dones    : np.ndarray, shape (N,) or None on the very first call
         """
         # 1) Get current obs from all controlled agents (GPUDrive-style)
-        #obs_t = self._get_gpudrive_obs_from_manager()  # (num_agents, obs_dim) # This is only used when GPUDrive is needed
-        obs_t = self._get_cmpe_obs_from_manager()
+        obs_t = self._get_gpudrive_obs_from_manager()  # (num_agents, obs_dim) # This is only used when GPUDrive is needed
+        #obs_t = self._get_cmpe_obs_from_manager()
 
         rewards = None
         dones = None

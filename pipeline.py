@@ -11,8 +11,8 @@ from remote_policy import RemoteSimPolicy
 
 if __name__ == "__main__": 
     #Starting Carla Client
-    #config = ConfigLoader()
-    config = ConfigLoader("config_cmpe.yaml")
+    config = ConfigLoader()
+    #config = ConfigLoader("config_cmpe.yaml")
     client = carlaClient()
     world = CarlaWorld(config)
     policy = None
@@ -30,6 +30,7 @@ if __name__ == "__main__":
             try:
                 # 1) RL step: read obs, log transition, choose & apply new actions
                 obs, act, rew, done = rl.step()
+                time.sleep(1)
                 print("step", t, "obs shape:", obs.shape, "act shape:", act.shape)
 
                 if config.get_if_route_planning():
