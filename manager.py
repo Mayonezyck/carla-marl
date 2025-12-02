@@ -162,6 +162,38 @@ class Manager:
 
         return obs.astype(np.float32)
     
+    def get_current_goal_location(self, agent) -> carla.Location:
+        """
+        For a given agent, return the current goal location:
+
+          - If the agent has a route (current_waypoint_plan) and a valid
+            current_wp_index, use that waypoint as the current intermediate goal.
+          - Otherwise, fall back to agent.destination.
+        """
+        vehicle = getattr(agent, "vehicle", None)
+        if vehicle is None:
+            # Fallback: arbitrary location
+            return self.world.get_map().get_spawn_points()[0].location
+
+        # Default: use final destination if present
+        tf = vehicle.get_transform()
+        loc = tf.location
+        default_goal = getattr(agent, "destination", loc)
+
+        route = getattr(agent, "current_waypoint_plan", None)
+        wp_idx = int(getattr(agent, "current_wp_index", 0))
+
+        if route is None or len(route) == 0:
+            return default_goal
+
+        if wp_idx < 0 or wp_idx >= len(route):
+            # Index out of range → use final dest
+            return default_goal
+
+        wp, _ = route[wp_idx]
+        return wp.transform.location
+
+
     def get_agent_cmpe_style_obs(self, agent) -> np.ndarray:
         """
         Low-dim CMPE observation for one agent.
@@ -213,14 +245,15 @@ class Manager:
         heading_err_norm = float(heading_err / math.pi)  # [-1, 1]
 
         # ------------------------------------------------------------------
-        # 3) Distance to goal (normalized by 100 m)
+        # 3) Distance to current goal (intermediate waypoint or final dest)
+        #     - normalized by 100 m
         # ------------------------------------------------------------------
-        # assumes your Controlled_Agents has .destination as a carla.Location
-        goal_location: carla.Location = getattr(agent, "destination", loc)
+        goal_location: carla.Location = self.get_current_goal_location(agent)
         dx = float(goal_location.x) - float(loc.x)
         dy = float(goal_location.y) - float(loc.y)
         dist_to_goal = math.sqrt(dx * dx + dy * dy)
         dist_to_goal_norm = float(np.clip(dist_to_goal / 100.0, 0.0, 1.0))
+
 
         # ------------------------------------------------------------------
         # 4) Lateral offset from lane center ([-1, 1])
@@ -568,16 +601,32 @@ class Manager:
                     continue
 
                 # ------------------------------------------------------------------
-                # Distance-based progress toward goal
+                # Distance-based progress toward current goal (subgoal or final)
                 # ------------------------------------------------------------------
-                destination = getattr(agent, "destination", vehicle.get_transform().location)
                 loc = vehicle.get_transform().location
 
-                dx = float(destination.x) - float(loc.x)
-                dy = float(destination.y) - float(loc.y)
+                # Determine current goal:
+                #   - intermediate waypoint if available
+                #   - otherwise final destination
+                route = getattr(agent, "current_waypoint_plan", None)
+                wp_idx = int(getattr(agent, "current_wp_index", 0))
+
+                use_route = route is not None and len(route) > 0
+                is_final_goal = True  # assume final until proven otherwise
+
+                if use_route and 0 <= wp_idx < len(route):
+                    wp, _ = route[wp_idx]
+                    goal_loc = wp.transform.location
+                    is_final_goal = (wp_idx == len(route) - 1)
+                else:
+                    goal_loc = getattr(agent, "destination", loc)
+                    is_final_goal = True
+
+                dx = float(goal_loc.x) - float(loc.x)
+                dy = float(goal_loc.y) - float(loc.y)
                 dist = float(np.sqrt(dx * dx + dy * dy))
 
-                # previous distance stored on agent (per-episode)
+                # previous distance stored on agent (per-episode), for THIS goal
                 dist_prev = getattr(agent, "prev_dist_to_goal", None)
                 if dist_prev is None:
                     dist_prev = dist
@@ -591,12 +640,26 @@ class Manager:
                 done = False
 
                 # ------------------------------------------------------------------
-                # Goal reached
+                # Goal reached logic:
+                #   - intermediate waypoint → small reward + advance wp index
+                #   - final waypoint (or no route) → big reward + done
                 # ------------------------------------------------------------------
                 GOAL_RADIUS = 3.0  # meters
+                INTERMEDIATE_REWARD = 10.0
+                FINAL_REWARD = 100.0
+
                 if dist < GOAL_RADIUS:
-                    r += 100.0
-                    done = True
+                    if use_route and not is_final_goal:
+                        # Reached an intermediate waypoint
+                        r += INTERMEDIATE_REWARD
+                        # Advance to the next waypoint in the route
+                        agent.current_wp_index = wp_idx + 1
+                        # Reset distance baseline for the new goal
+                        agent.prev_dist_to_goal = None
+                    else:
+                        # Reached the final goal
+                        r += FINAL_REWARD
+                        done = True
 
                 # ------------------------------------------------------------------
                 # Collision penalty (using your fatal flag)

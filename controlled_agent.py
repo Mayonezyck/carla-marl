@@ -39,6 +39,8 @@ class Controlled_Agents(Agent):
         self._route_planner: GlobalRoutePlanner | None = None
         self.current_waypoint_plan: list[tuple[carla.Waypoint, Any]] = []
         self._route_debug_enabled: bool = False
+        # 0 = first waypoint, len-1 = final waypoint
+        self.current_wp_index: int = 0
 
         # Destination = random valid driving waypoint in the world
         self._lidar_queue: "queue.Queue[tuple[int, carla.LidarMeasurement]]" = queue.Queue()
