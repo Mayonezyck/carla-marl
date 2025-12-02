@@ -114,7 +114,8 @@ class RLHandler:
             dones    : np.ndarray, shape (N,) or None on the very first call
         """
         # 1) Get current obs from all controlled agents (GPUDrive-style)
-        obs_t = self._get_gpudrive_obs_from_manager()  # (num_agents, obs_dim) # This is only used when GPUDrive is needed
+        #obs_t = self._get_gpudrive_obs_from_manager()  # (num_agents, obs_dim) # This is only used when GPUDrive is needed
+        obs_t = self._get_cmpe_obs_from_manager()
 
         rewards = None
         dones = None
@@ -140,18 +141,11 @@ class RLHandler:
             # GPUDrive returns discrete values; decode here
             discrete_actions = self.policy(obs_t)       # shape (N,) or scalar
             actions_t = self.decode_discrete_action(discrete_actions)
-
-        else:
-            actions_t = self._default_policy(obs_t)
-
-        if self.policy is not None:
-            discrete_actions = self.policy(obs_t)       # shape (N,) or scalar
-            actions_t = self.decode_discrete_action(discrete_actions)
             disc_np = np.asarray(discrete_actions).reshape(-1)
         else:
             actions_t = self._default_policy(obs_t)
-            # No discrete index in default policy; mark as NaN
             disc_np = np.full((obs_t.shape[0],), np.nan, dtype=np.float32)
+
 
         # Ensure actions are (N, action_dim)
         actions_t = np.asarray(actions_t, dtype=np.float32)
@@ -197,6 +191,41 @@ class RLHandler:
         self.step_count += 1
 
         return obs_t, actions_t, rewards, dones
+    
+    def _get_cmpe_obs_from_manager(self) -> np.array:
+        """
+        Build a batch of CMPE-style obs for all controlled agents.
+
+        Assumes your Manager has:
+            get_cmpe_style_obs(agent) -> torch.Tensor or np.ndarray
+        that returns a (N,) vector per agent (proprioception + front camera + ).
+        """
+        obs_list = []
+        for agent in self.manager.controlled_agents:
+            # If agent is dead / missing vehicle → just zero obs
+            if agent is None or getattr(agent, "vehicle", None) is None:
+                obs_vec = np.zeros(N, dtype=np.float32)  # adjust if obs_dim changes #TODO: fill in the obs space 
+                obs_list.append(obs_vec)
+                continue
+
+            obs = self.manager.get_gpudrive_style_obs(agent, agent.destination)
+            # Handle torch or numpy
+            try:
+                import torch
+                if isinstance(obs, torch.Tensor):
+                    obs_vec = obs.detach().cpu().numpy()
+                else:
+                    obs_vec = np.asarray(obs, dtype=np.float32)
+            except ImportError:
+                obs_vec = np.asarray(obs, dtype=np.float32)
+
+            obs_list.append(obs_vec)
+
+        if len(obs_list) == 0:
+            return np.zeros((0, 2984), dtype=np.float32)
+
+        obs_batch = np.stack(obs_list, axis=0)  # (N, obs_dim)
+        return obs_batch
 
     def _get_gpudrive_obs_from_manager(self) -> np.ndarray:
         """
@@ -252,11 +281,13 @@ class RLHandler:
         # Shape (N,)
         N = act.shape[0]
 
-        # Steering index: integer in [0, 12]
-        steer_idx = int(act // len(ACCEL_BINS))
+        # Steering index: integer in [0, 12] #NOTE: Yicheng tried another way around for decoding
+        #steer_idx = int(act // len(ACCEL_BINS)) 
+        steer_idx = int(act % len(STEER_BINS))
 
         # Acceleration index: integer in [0, 6]
-        accel_idx = int(act % len(ACCEL_BINS))
+        #accel_idx = int(act % len(ACCEL_BINS))
+        accel_idx = int(act // len(STEER_BINS))
 
         # Map to actual continuous values
         steer = STEER_BINS[steer_idx]              # radians
