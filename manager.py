@@ -521,6 +521,7 @@ class Manager:
         return frames, batch_obs
     
         # Compute reward and done for each controlled vehicle
+
     def get_rewards_and_dones(self):
         """
         Compute rewards and done flags for each controlled agent.
@@ -531,7 +532,7 @@ class Manager:
           - Collision (fatal flag)     → big negative + done (agent removed)
           - Lane invasion              → small negative (no auto-terminate)
           - Moving while light is red  → medium negative
-          - Small step penalty         → encourage faster completion
+          - Small per-step penalty     → encourage faster completion
 
         Returns
         -------
@@ -543,89 +544,105 @@ class Manager:
         dones = np.zeros(num_ctrl, dtype=bool)
 
         for i, agent in enumerate(self.controlled_agents):
-            # Agent missing or vehicle destroyed → treat as done with zero reward
-            if agent is None or agent.vehicle is None:
+            # Agent missing or no vehicle → treat as done with zero reward
+            if agent is None:
                 dones[i] = True
                 rewards[i] = 0.0
                 continue
 
-            vehicle = agent.vehicle
-
-            # Check if this vehicle is still marked active in global structures
-            idx_all = self.vehicle_to_index.get(vehicle.id, None)
-            if idx_all is None or not self.active_flags[idx_all]:
+            vehicle = getattr(agent, "vehicle", None)
+            if vehicle is None:
                 dones[i] = True
                 rewards[i] = 0.0
                 continue
 
-            # ------------------------------------------------------------------
-            # Distance-based progress toward goal
-            # ------------------------------------------------------------------
-            destination = getattr(agent, "destination", vehicle.get_transform().location)
-            loc = vehicle.get_transform().location
+            # Some vehicles may already be destroyed by CARLA.
+            # Any call on them (get_transform, get_velocity, etc.)
+            # will raise RuntimeError. We catch that and mark as done.
+            try:
+                # Check if this vehicle is still marked active in global structures
+                idx_all = self.vehicle_to_index.get(vehicle.id, None)
+                if idx_all is None or not self.active_flags[idx_all]:
+                    dones[i] = True
+                    rewards[i] = 0.0
+                    continue
 
-            dx = float(destination.x) - float(loc.x)
-            dy = float(destination.y) - float(loc.y)
-            dist = float(np.sqrt(dx * dx + dy * dy))
+                # ------------------------------------------------------------------
+                # Distance-based progress toward goal
+                # ------------------------------------------------------------------
+                destination = getattr(agent, "destination", vehicle.get_transform().location)
+                loc = vehicle.get_transform().location
 
-            # previous distance stored on agent (per-episode)
-            dist_prev = getattr(agent, "prev_dist_to_goal", None)
-            if dist_prev is None:
-                dist_prev = dist
-            progress = dist_prev - dist  # > 0 if moving closer
-            agent.prev_dist_to_goal = dist
+                dx = float(destination.x) - float(loc.x)
+                dy = float(destination.y) - float(loc.y)
+                dist = float(np.sqrt(dx * dx + dy * dy))
 
-            r = 0.0
-            # reward for progress
-            r += 1.0 * progress
+                # previous distance stored on agent (per-episode)
+                dist_prev = getattr(agent, "prev_dist_to_goal", None)
+                if dist_prev is None:
+                    dist_prev = dist
+                progress = dist_prev - dist  # > 0 if moving closer
+                agent.prev_dist_to_goal = dist
 
-            done = False
+                r = 0.0
+                # reward for progress
+                r += 1.0 * progress
 
-            # ------------------------------------------------------------------
-            # Goal reached
-            # ------------------------------------------------------------------
-            GOAL_RADIUS = 3.0  # meters
-            if dist < GOAL_RADIUS:
-                r += 100.0
-                done = True
+                done = False
 
-            # ------------------------------------------------------------------
-            # Collision penalty (using your fatal flag)
-            # ------------------------------------------------------------------
-            if agent.get_fatal_flag():
-                r -= 100.0
-                done = True
-                # Remove this agent (vehicle + sensors) from the world
+                # ------------------------------------------------------------------
+                # Goal reached
+                # ------------------------------------------------------------------
+                GOAL_RADIUS = 3.0  # meters
+                if dist < GOAL_RADIUS:
+                    r += 100.0
+                    done = True
+
+                # ------------------------------------------------------------------
+                # Collision penalty (using your fatal flag)
+                # ------------------------------------------------------------------
+                if agent.get_fatal_flag():
+                    r -= 100.0
+                    done = True
+                    # Remove this agent (vehicle + sensors) from the world
+                    self.remove_agent(agent)
+
+                # ------------------------------------------------------------------
+                # Lane invasion penalty (no terminate by default)
+                # ------------------------------------------------------------------
+                lane_inv_flag = bool(getattr(agent, "had_lane_invasion", False))
+                if lane_inv_flag:
+                    r -= 5.0
+
+                # ------------------------------------------------------------------
+                # Red-light violation penalty
+                #   - simple: penalize moving faster than 0.5 m/s on red
+                # ------------------------------------------------------------------
+                vel = vehicle.get_velocity()
+                speed = float(np.sqrt(vel.x**2 + vel.y**2 + vel.z**2))
+
+                tl = vehicle.get_traffic_light()
+                if tl is not None and tl.get_state() == carla.TrafficLightState.Red:
+                    if speed > 0.5:
+                        r -= 40.0
+                        # If you want, you *could* also terminate here:
+                        # done = True
+
+                # ------------------------------------------------------------------
+                # Small per-step time penalty
+                # ------------------------------------------------------------------
+                r -= 0.01
+
+                rewards[i] = float(r)
+                dones[i] = done
+
+            except RuntimeError as e:
+                # This happens if the underlying CARLA actor is already destroyed.
+                print(f"[Manager] Controlled agent {i} vehicle actor destroyed: {e}")
+                # Mark as done, zero reward, and clean up.
+                rewards[i] = 0.0
+                dones[i] = True
                 self.remove_agent(agent)
-
-            # ------------------------------------------------------------------
-            # Lane invasion penalty (no terminate by default)
-            # ------------------------------------------------------------------
-            lane_inv_flag = bool(getattr(agent, "had_lane_invasion", False))
-            if lane_inv_flag:
-                r -= 5.0
-
-            # ------------------------------------------------------------------
-            # Red-light violation penalty
-            #   - simple: penalize moving faster than 0.5 m/s on red
-            # ------------------------------------------------------------------
-            vel = vehicle.get_velocity()
-            speed = float(np.sqrt(vel.x**2 + vel.y**2 + vel.z**2))
-
-            tl = vehicle.get_traffic_light()
-            if tl is not None and tl.get_state() == carla.TrafficLightState.Red:
-                if speed > 0.5:
-                    r -= 40.0
-                    # If you want, you *could* also terminate here:
-                    # done = True
-
-            # ------------------------------------------------------------------
-            # Small per-step time penalty
-            # ------------------------------------------------------------------
-            r -= 0.01
-
-            rewards[i] = float(r)
-            dones[i] = done
 
         return rewards, dones
 
