@@ -107,6 +107,7 @@ class RLHandler:
         # Cached from previous step
         self.last_obs = None       # type: Optional[np.ndarray]   # (N, P, 3)
         self.last_actions = None   # type: Optional[np.ndarray]   # (N, action_dim)
+        self.last_disc_actions = None  # type: Optional[np.ndarray]  # (N,)
 
         self.step_count: int = 0
         self.debug_history = [] 
@@ -141,12 +142,17 @@ class RLHandler:
         dones = None
 
         # 2) If we have a previous state-action, build transition
-        if self.last_obs is not None and self.last_actions is not None:
+        if (
+            self.last_obs is not None
+            and self.last_actions is not None
+            and self.last_disc_actions is not None
+        ):
             rewards, dones = self._compute_reward_and_done(
                 self.last_obs,
                 self.last_actions,
                 obs_t,
             )
+
             # Store transition in replay buffer
             self.buffer.add_batch(
                 obs=self.last_obs,
@@ -154,7 +160,9 @@ class RLHandler:
                 rewards=rewards,
                 next_obs=obs_t,
                 dones=dones,
+                disc_actions=self.last_disc_actions,
             )
+
 
         # 3) Compute new actions from current obs
         if self.policy is not None:
@@ -165,6 +173,13 @@ class RLHandler:
         else:
             actions_t = self._default_policy(obs_t)
             disc_np = np.full((obs_t.shape[0],), np.nan, dtype=np.float32)
+
+        # Cache discrete actions for the NEXT transition storage
+        if self.policy is not None:
+            self.last_disc_actions = disc_np.copy()
+        else:
+            self.last_disc_actions = None
+
 
 
         # Ensure actions are (N, action_dim)
@@ -346,6 +361,7 @@ class RLHandler:
         """
         self.last_obs = None
         self.last_actions = None
+        self.last_disc_actions = None
         self.step_count = 0
         self.debug_history = []
 
