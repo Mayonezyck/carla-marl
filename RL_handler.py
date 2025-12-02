@@ -4,10 +4,16 @@ import numpy as np
 from typing import Optional, Callable, Any, Sequence, List, Dict
 import torch
 
-# Temporary constants
 STEER_BINS = np.linspace(-np.pi, np.pi, 13)   # 13 values
 ACCEL_BINS = np.array([-4.0, -2.6, -1.3, 0.0, 1.3, 2.6, 4.0])  # 7 values
-CMPE_OBS_DIM = 10  # or 12, whatever we define below
+
+# ---- CMPE obs layout: 10 scalar features + seg + depth ----
+CMPE_BASE_DIM = 10          # scalar ego features
+SEG_DEPTH_H = 128
+SEG_DEPTH_W = 128
+SEG_DEPTH_FEAT_DIM = 2 * SEG_DEPTH_H * SEG_DEPTH_W  # 2 channels (seg, depth)
+
+CMPE_OBS_DIM = CMPE_BASE_DIM + SEG_DEPTH_FEAT_DIM   # 10 + 2*128*128 = 32778
 
 
 class SimpleReplayBuffer:
@@ -169,32 +175,19 @@ class RLHandler:
 
         # 3) Compute new actions from current obs
         if self.policy is not None:
-            # If use_dict_policy=True, build a dict observation with CMPE + vision.
-            if self.use_dict_policy:
-                seg_batch, depth_batch = self._get_seg_depth_from_manager()
-                policy_input = {
-                    "cmpe": obs_t,        # (N, CMPE_OBS_DIM)
-                    "seg": seg_batch,     # (N, H, W) or (N, C, H, W)
-                    "depth": depth_batch  # (N, H, W)
-                }
-            else:
-                # Old behavior: plain CMPE obs
-                policy_input = obs_t
-
-            # Policy returns discrete actions; decode into continuous CARLA control
-            discrete_actions = self.policy(policy_input)  # shape (N,) or scalar
+            # Policy expects a flat obs array: (N, obs_dim).
+            # The network itself will split cmpe vs image and reshape internally.
+            discrete_actions = self.policy(obs_t)       # shape (N,) or scalar
             actions_t = self.decode_discrete_action(discrete_actions)
             disc_np = np.asarray(discrete_actions).reshape(-1)
         else:
             actions_t = self._default_policy(obs_t)
             disc_np = np.full((obs_t.shape[0],), np.nan, dtype=np.float32)
 
-
         # Cache discrete actions for the NEXT transition storage
         if self.policy is not None:
             self.last_disc_actions = disc_np.copy()
-        else:
-            self.last_disc_actions = None
+
 
 
 
@@ -248,8 +241,9 @@ class RLHandler:
         Build a batch of CMPE-style obs for all controlled agents.
 
         Assumes your Manager has:
-            get_cmpe_style_obs(agent, destination) -> torch.Tensor or np.ndarray
-        that returns a (CMPE_OBS_DIM,) vector per agent.
+            get_agent_cmpe_style_obs(agent) -> np.ndarray or torch.Tensor
+        that returns a (CMPE_OBS_DIM,) vector per agent:
+            [10 cmpe scalars, seg_flat, depth_flat]
         """
         obs_list = []
         for agent in self.manager.controlled_agents:
@@ -280,6 +274,7 @@ class RLHandler:
 
         obs_batch = np.stack(obs_list, axis=0)  # (N, CMPE_OBS_DIM)
         return obs_batch
+
     
 
     def _get_seg_depth_from_manager(self):

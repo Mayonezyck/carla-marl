@@ -28,6 +28,11 @@ from pathlib import Path
 import imageio
 import pygame
 
+# --------- DQN training hyperparams ----------
+LEARNING_START = 5_000      # replay size before we start learning
+TRAIN_EVERY    = 4          # gradient step every N env steps
+GRAD_UPDATES_PER_CALL = 1   # how many batches per train_step call
+
 
 
 def maybe_train_from_buffer(rl: RLHandler, step: int) -> None:
@@ -102,6 +107,10 @@ if __name__ == "__main__":
             epsilon_end=0.1,
             epsilon_decay_steps=50_000,
             target_update_freq=1000,
+            cmpe_dim=10,          # first 10 are the scalar features
+            img_channels=2,       # seg + depth
+            img_height=128,
+            img_width=128,
         )
         # <- here we want dict-style obs with vision
         use_dict_policy = True
@@ -182,9 +191,11 @@ if __name__ == "__main__":
                     if rew.shape[0] > 0:
                         episode_reward += float(rew[0])
 
-                    # One DQN update step from replay buffer (if we use local DQN)
+                    # DQN update from replay buffer with warmup + periodic updates
                     if isinstance(policy, DQNPolicy):
-                        policy.train_step(rl.buffer)
+                        if len(rl.buffer) >= LEARNING_START and (global_step % TRAIN_EVERY == 0):
+                            for _ in range(GRAD_UPDATES_PER_CALL):
+                                policy.train_step(rl.buffer)
 
                     # If all controlled agents are done, end the episode
                     if np.all(done):
@@ -193,6 +204,7 @@ if __name__ == "__main__":
                             f"step {step_in_ep} (all agents done)."
                         )
                         break
+
 
                 # 3) Pygame visualization: RGB + segmentation + depth + text
                 for event in pygame.event.get():

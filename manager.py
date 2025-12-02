@@ -17,6 +17,10 @@ MAX_VEH_LEN = 30.0
 MAX_VEH_WIDTH = 15.0
 MIN_REL_GOAL_COORD = -1000.0
 MAX_REL_GOAL_COORD = 1000.0
+SEG_DEPTH_H = 128
+SEG_DEPTH_W = 128
+CMPE_OBS_DIM = 10 + 2 * SEG_DEPTH_H * SEG_DEPTH_W
+
 
 
 def normalize_min_max_np(x: float, min_val: float, max_val: float) -> float:
@@ -196,9 +200,9 @@ class Manager:
 
     def get_agent_cmpe_style_obs(self, agent) -> np.ndarray:
         """
-        Low-dim CMPE observation for one agent.
+        CMPE observation for one agent.
 
-        Returns a 10D vector:
+        Core 10D vector:
             [speed_norm,
              heading_err_norm,
              dist_to_goal_norm,
@@ -209,10 +213,16 @@ class Manager:
              at_junction_flag,
              throttle_prev,
              steer_prev]
+
+        Then we append:
+            - flattened semantic segmentation (128x128), normalized to [0, 1]
+            - flattened depth (128x128), clipped to [0, 100] m and normalized to [0, 1]
+
+        Final shape: (CMPE_OBS_DIM,) == 10 + 2 * 128 * 128 = 32778
         """
-        # If agent is dead / missing vehicle → zeros
+        # If agent/vehicle is gone → return all zeros
         if agent is None or getattr(agent, "vehicle", None) is None:
-            return np.zeros(10, dtype=np.float32)
+            return np.zeros(CMPE_OBS_DIM, dtype=np.float32)
 
         vehicle: carla.Vehicle = agent.vehicle
         world = self.world
@@ -241,19 +251,20 @@ class Manager:
         lane_yaw_rad = math.radians(wp.transform.rotation.yaw)
         heading_err = yaw_rad - lane_yaw_rad
         # wrap to [-pi, pi]
-        heading_err = (heading_err + math.pi) % (2.0 * math.pi) - math.pi
+        while heading_err > math.pi:
+            heading_err -= 2.0 * math.pi
+        while heading_err < -math.pi:
+            heading_err += 2.0 * math.pi
         heading_err_norm = float(heading_err / math.pi)  # [-1, 1]
 
         # ------------------------------------------------------------------
-        # 3) Distance to current goal (intermediate waypoint or final dest)
-        #     - normalized by 100 m
+        # 3) Distance to goal (normalized by 100 m)
         # ------------------------------------------------------------------
-        goal_location: carla.Location = self.get_current_goal_location(agent)
+        goal_location: carla.Location = getattr(agent, "destination", loc)
         dx = float(goal_location.x) - float(loc.x)
         dy = float(goal_location.y) - float(loc.y)
         dist_to_goal = math.sqrt(dx * dx + dy * dy)
         dist_to_goal_norm = float(np.clip(dist_to_goal / 100.0, 0.0, 1.0))
-
 
         # ------------------------------------------------------------------
         # 4) Lateral offset from lane center ([-1, 1])
@@ -264,53 +275,42 @@ class Manager:
         dy_lane = float(loc.y) - float(lane_loc.y)
 
         lane_yaw = math.radians(lane_tf.rotation.yaw)
-        # lane forward
         fx = math.cos(lane_yaw)
         fy = math.sin(lane_yaw)
-        # lane right (perp)
         rx = -fy
         ry = fx
         lateral = dx_lane * rx + dy_lane * ry  # right-positive
 
         # approximate half-lane width (2 m); adjust if you want
-        lateral_norm = float(np.clip(lateral / 2.0, -1.0, 1.0))
+        half_lane_width = 2.0
+        lateral_norm = float(np.clip(lateral / half_lane_width, -1.0, 1.0))
 
         # ------------------------------------------------------------------
-        # 5) Collision & lane invasion flags
+        # 5) Flags: collision / lane invasion / traffic light / junction
         # ------------------------------------------------------------------
-        # you should set these in Controlled_Agents sensor callbacks
-        collision_flag = 1.0 if getattr(agent, "had_collision", False) else 0.0
+        collision_flag = 1.0 if agent.get_fatal_flag() else 0.0
+
         lane_inv_flag = 1.0 if getattr(agent, "had_lane_invasion", False) else 0.0
 
-        # ------------------------------------------------------------------
-        # 6) Traffic light state
-        # ------------------------------------------------------------------
-        traffic_light_red_flag = 0.0
-        at_junction_flag = 0.0
-
         tl = vehicle.get_traffic_light()
-        if tl is not None:
-            at_junction_flag = 1.0
-            if tl.get_state() == carla.TrafficLightState.Red:
-                traffic_light_red_flag = 1.0
+        traffic_light_red_flag = 0.0
+        if tl is not None and tl.get_state() == carla.TrafficLightState.Red:
+            traffic_light_red_flag = 1.0
+
+        at_junction_flag = 1.0 if wp.is_junction else 0.0
 
         # ------------------------------------------------------------------
-        # 7) Previous control (throttle, steer)
+        # 6) Previous control (throttle, steer)
         # ------------------------------------------------------------------
-        ctrl = getattr(agent, "last_control", None)
-        throttle_prev = 0.0
-        steer_prev = 0.0
+        prev_ctrl = getattr(agent, "last_control", None)
+        if prev_ctrl is None:
+            throttle_prev = 0.0
+            steer_prev = 0.0
+        else:
+            throttle_prev = float(prev_ctrl.throttle)
+            steer_prev = float(prev_ctrl.steer)
 
-        if ctrl is not None:
-            # support both dict and object-with-attributes
-            if isinstance(ctrl, dict):
-                throttle_prev = float(ctrl.get("throttle", 0.0))
-                steer_prev = float(ctrl.get("steer", 0.0))
-            else:
-                throttle_prev = float(getattr(ctrl, "throttle", 0.0))
-                steer_prev = float(getattr(ctrl, "steer", 0.0))
-
-        obs = np.array(
+        core_obs = np.array(
             [
                 speed_norm,
                 heading_err_norm,
@@ -326,7 +326,45 @@ class Manager:
             dtype=np.float32,
         )
 
-        return obs
+        # ------------------------------------------------------------------
+        # 7) Append seg + depth images (128x128 each)
+        # ------------------------------------------------------------------
+        # Latest segmentation (H, W) int IDs
+        seg = agent.get_seg_latest() if hasattr(agent, "get_seg_latest") else None
+        depth = agent.get_depth_latest() if hasattr(agent, "get_depth_latest") else None
+
+        if seg is None or depth is None:
+            # If cameras haven't produced anything yet, append zeros
+            seg_flat = np.zeros(SEG_DEPTH_H * SEG_DEPTH_W, dtype=np.float32)
+            depth_flat = np.zeros(SEG_DEPTH_H * SEG_DEPTH_W, dtype=np.float32)
+        else:
+            # Ensure correct shape
+            seg = np.asarray(seg)
+            depth = np.asarray(depth, dtype=np.float32)
+
+            # Resize / crop if dimensions differ (optional; here we just assert)
+            assert seg.shape == (SEG_DEPTH_H, SEG_DEPTH_W), f"seg shape {seg.shape} != {(SEG_DEPTH_H, SEG_DEPTH_W)}"
+            assert depth.shape == (SEG_DEPTH_H, SEG_DEPTH_W), f"depth shape {depth.shape} != {(SEG_DEPTH_H, SEG_DEPTH_W)}"
+
+            # Normalize segmentation IDs to [0, 1] (assume IDs in [0, 23] or [0, 255])
+            seg_norm = seg.astype(np.float32) / 255.0
+
+            # Depth: clip to [0, 100] m and normalize to [0, 1]
+            depth_clipped = np.clip(depth, 0.0, 100.0)
+            depth_norm = depth_clipped / 100.0
+
+            seg_flat = seg_norm.flatten().astype(np.float32)
+            depth_flat = depth_norm.flatten().astype(np.float32)
+
+        full_obs = np.concatenate([core_obs, seg_flat, depth_flat], axis=0)
+        # Safety check
+        if full_obs.shape[0] != CMPE_OBS_DIM:
+            raise ValueError(
+                f"CMPE obs dim mismatch: got {full_obs.shape[0]}, expected {CMPE_OBS_DIM}"
+            )
+
+        return full_obs
+
 
     
     def get_agent_roadgraph_obs(self, agent) -> torch.Tensor:
@@ -714,7 +752,7 @@ class Manager:
     # Visualize Path for each controlled
     def visualize_path(self):
         for agent in self.controlled_agents:
-            print('drawing drawing')
+            #print('drawing drawing')
             agent.draw_current_route_debug()
 
     # --------------------------------------------------

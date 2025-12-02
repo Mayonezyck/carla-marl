@@ -338,8 +338,8 @@ class Controlled_Agents(Agent):
                 # import open3d as o3d
                 # import numpy as np
                 # Just push into queue + keep last for non-blocking access
-                print('debug: using actual callback')
-                print(len(data.raw_data))
+                #print('debug: using actual callback')
+                #print(len(data.raw_data))
                 item = (data.frame, data)
                 self._last_lidar = item
                 # points = np.frombuffer(data.raw_data, dtype=np.float32)
