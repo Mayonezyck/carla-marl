@@ -207,10 +207,10 @@ class Manager:
         Core 10D vector:
             [speed_norm,
              heading_err_norm,
-             dist_to_goal_norm,
-             lateral_norm,
+             rel_goal_x_norm,        # NEW: goal forward distance in ego frame
+             rel_goal_y_norm,        # NEW: goal lateral distance in ego frame
              collision_flag,
-             lane_invasion_flag,
+             lane_inv_flag,
              traffic_light_red_flag,
              at_junction_flag,
              throttle_prev,
@@ -222,6 +222,7 @@ class Manager:
 
         Final shape: (CMPE_OBS_DIM,) == 10 + 2 * 128 * 128 = 32778
         """
+
         # If agent/vehicle is gone → return all zeros
         if agent is None or getattr(agent, "vehicle", None) is None:
             return np.zeros(CMPE_OBS_DIM, dtype=np.float32)
@@ -260,32 +261,32 @@ class Manager:
         heading_err_norm = float(heading_err / math.pi)  # [-1, 1]
 
         # ------------------------------------------------------------------
-        # 3) Distance to goal (normalized by 100 m)
+        # 3) Relative goal in ego frame (rel_x, rel_y), both in [-1, 1]
         # ------------------------------------------------------------------
         goal_location: carla.Location = getattr(agent, "destination", loc)
+
+        # world-frame difference
         dx = float(goal_location.x) - float(loc.x)
         dy = float(goal_location.y) - float(loc.y)
-        dist_to_goal = math.sqrt(dx * dx + dy * dy)
-        dist_to_goal_norm = float(np.clip(dist_to_goal / 100.0, 0.0, 1.0))
 
-        # ------------------------------------------------------------------
-        # 4) Lateral offset from lane center ([-1, 1])
-        # ------------------------------------------------------------------
-        lane_tf = wp.transform
-        lane_loc = lane_tf.location
-        dx_lane = float(loc.x) - float(lane_loc.x)
-        dy_lane = float(loc.y) - float(lane_loc.y)
+        # ego yaw (same as used for heading_err)
+        ego_yaw_rad = yaw_rad  # from above
 
-        lane_yaw = math.radians(lane_tf.rotation.yaw)
-        fx = math.cos(lane_yaw)
-        fy = math.sin(lane_yaw)
-        rx = -fy
-        ry = fx
-        lateral = dx_lane * rx + dy_lane * ry  # right-positive
+        cos_e = math.cos(ego_yaw_rad)
+        sin_e = math.sin(ego_yaw_rad)
 
-        # approximate half-lane width (2 m); adjust if you want
-        half_lane_width = 2.0
-        lateral_norm = float(np.clip(lateral / half_lane_width, -1.0, 1.0))
+        # rotate into ego frame: x forward, y left
+        rel_x = cos_e * dx + sin_e * dy
+        rel_y = -sin_e * dx + cos_e * dy
+
+        # Normalize to [-1, 1] using global bounds
+        rel_goal_x_norm = normalize_min_max_np(
+            rel_x, MIN_REL_GOAL_COORD, MAX_REL_GOAL_COORD
+        )
+        rel_goal_y_norm = normalize_min_max_np(
+            rel_y, MIN_REL_GOAL_COORD, MAX_REL_GOAL_COORD
+        )
+
 
         # ------------------------------------------------------------------
         # 5) Flags: collision / lane invasion / traffic light / junction
@@ -321,8 +322,8 @@ class Manager:
             [
                 speed_norm,
                 heading_err_norm,
-                dist_to_goal_norm,
-                lateral_norm,
+                rel_goal_x_norm,
+                rel_goal_y_norm,
                 collision_flag,
                 lane_inv_flag,
                 traffic_light_red_flag,
