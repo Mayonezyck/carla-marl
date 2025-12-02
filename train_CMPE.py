@@ -17,6 +17,9 @@ from config import ConfigLoader
 from world import CarlaWorld
 from RL_handler import RLHandler
 from remote_policy import RemoteSimPolicy
+from RL_handler import RLHandler, CMPE_OBS_DIM, STEER_BINS, ACCEL_BINS
+from dqn_policy import DQNPolicy
+
 
 
 def maybe_train_from_buffer(rl: RLHandler, step: int) -> None:
@@ -57,10 +60,22 @@ if __name__ == "__main__":
     if config.get_use_policy() == "remote":
         policy = RemoteSimPolicy(base_url="http://0.0.0.0:7999")
         # RLHandler will call policy(obs_batch) and then decode_discrete_action.
-    else:
-        # If policy is None, RLHandler._default_policy() will be used.
-        # You can plug in a local neural net policy here later.
-        policy = None
+    elif config.get_use_policy() == "local-dqn":
+        num_steer = len(STEER_BINS)
+        num_accel = len(ACCEL_BINS)
+        num_actions = num_steer * num_accel
+
+        policy = DQNPolicy(
+            obs_dim=CMPE_OBS_DIM,
+            num_actions=num_actions,
+            lr=1e-3,
+            gamma=0.99,
+            batch_size=64,
+            epsilon_start=1.0,
+            epsilon_end=0.1,
+            epsilon_decay_steps=50_000,
+            target_update_freq=1000,
+        )
 
     # -----------------------------
     # 3) RLHandler
