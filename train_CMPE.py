@@ -2,16 +2,16 @@
 #
 # Training-oriented version of the CMPE pipeline.
 # - Uses CarlaWorld + Manager + RLHandler (same wiring style as main.py)
+# - Runs multiple episodes
 # - Fills the replay buffer
-# - Provides a hook for learning steps from the buffer
+# - Has a hook for learning from the buffer
 
-import time
 import traceback
 from datetime import datetime
 
 import numpy as np
-
 import carla
+
 from client import carlaClient
 from config import ConfigLoader
 from world import CarlaWorld
@@ -25,6 +25,7 @@ def maybe_train_from_buffer(rl: RLHandler, step: int) -> None:
 
     Right now:
       - does nothing
+
     Later:
       - sample from rl.buffer
       - run a gradient step on your policy / critic
@@ -52,8 +53,6 @@ if __name__ == "__main__":
     # -----------------------------
     # 2) Build policy for RLHandler
     # -----------------------------
-    policy = None
-
     # If you want to use a remote policy server for actions:
     if config.get_use_policy() == "remote":
         policy = RemoteSimPolicy(base_url="http://0.0.0.0:7999")
@@ -68,28 +67,44 @@ if __name__ == "__main__":
     # -----------------------------
     rl = RLHandler(world.manager, policy=policy)
 
-    # Training hyperparams (can be moved into config if you like)
-    max_total_steps = getattr(config, "max_total_steps", 10_000)
-    print(f"[train_CMPE] Starting training loop for up to {max_total_steps} steps.")
+    # -----------------------------
+    # 4) Episode settings
+    # -----------------------------
+    # If your config has these getters, use them; otherwise defaults.
+    max_episodes = getattr(config, "max_episodes", 50)
+    max_steps_per_episode = getattr(config, "max_steps_per_episode", 500)
 
-    step_idx = 0
+    print(
+        f"[train_CMPE] Starting training: "
+        f"{max_episodes} episodes, up to {max_steps_per_episode} steps each."
+    )
+
+    global_step = 0
 
     try:
-        while step_idx < max_total_steps:
-            step_idx += 1
+        for ep in range(1, max_episodes + 1):
+            print(f"\n[train_CMPE] === Episode {ep} ===")
 
-            try:
+            # Reset environment (destroy & respawn agents)
+            world.manager.reset_episode()
+
+            # Reset RLHandler per-episode state (keep replay buffer)
+            rl.reset(clear_buffer=False)
+
+            for step_in_ep in range(1, max_steps_per_episode + 1):
+                global_step += 1
+
                 # 1) RL step: read obs, log transition, choose & apply new actions
                 obs, act, rew, done = rl.step()
                 # obs:  (N, CMPE_OBS_DIM)
                 # act:  (N, 3)
-                # rew:  (N,) or None on very first step
-                # done: (N,) or None on very first step
+                # rew:  (N,) or None on the very first ever step
+                # done: (N,) or None on the very first ever step
 
-                # Debug print (can be throttled or removed later)
+                # Debug print (you can comment this out if too noisy)
                 print(
-                    f"[train_CMPE] step {step_idx} | "
-                    f"obs shape: {obs.shape}, act shape: {act.shape}"
+                    f"[train_CMPE] ep {ep} | step {step_in_ep} "
+                    f"| obs shape: {obs.shape}, act shape: {act.shape}"
                 )
 
                 # Optional: visualize planned routes
@@ -98,28 +113,25 @@ if __name__ == "__main__":
 
                 # 2) Optionally run a training step from replay buffer
                 if rew is not None:
-                    maybe_train_from_buffer(rl, step_idx)
+                    maybe_train_from_buffer(rl, global_step)
 
-                    # If you later implement episode termination in Manager.get_rewards_and_dones(),
-                    # you can also check for all-done here:
-                    #
-                    # if np.all(done):
-                    #     print(f"[train_CMPE] all agents done at step {step_idx}")
-                    #     # TODO: when you have a reset mechanism, call:
-                    #     # world.manager.reset_episode()
-                    #     # rl.reset(clear_buffer=False)
-                    #     # and continue training into next episode.
+                    # If all controlled agents are done, end the episode
+                    if np.all(done):
+                        print(
+                            f"[train_CMPE] Episode {ep} finished early at "
+                            f"step {step_in_ep} (all agents done)."
+                        )
+                        break
 
                 # 3) Advance the CARLA world one tick
                 world.tick()
 
-            except Exception as e:
-                print("[train_CMPE] Exception inside main loop:", repr(e))
-                traceback.print_exc()
-                break   # exit while so we still hit finally
-
     except KeyboardInterrupt:
         print("[train_CMPE] Stopping via KeyboardInterrupt...")
+
+    except Exception as e:
+        print("[train_CMPE] Unhandled exception in training loop:", repr(e))
+        traceback.print_exc()
 
     finally:
         # Save debug history from RLHandler for offline inspection

@@ -520,18 +520,18 @@ class Manager:
         batch_obs = np.stack(obs_list, axis=0)
         return frames, batch_obs
     
-    # Compute reward and done for each controlled vehicle
+        # Compute reward and done for each controlled vehicle
     def get_rewards_and_dones(self):
         """
         Compute rewards and done flags for each controlled agent.
 
-        Current logic:
-          - If agent collided this step:
-                reward = -10.0, done = True, agent is removed from world.
-          - If agent is already inactive (destroyed / no vehicle):
-                done = True, reward = 0.0
-          - Otherwise:
-                reward = 0.0, done = False
+        Heuristic:
+          - Progress toward goal       → positive reward
+          - Reaching goal              → big positive + done
+          - Collision (fatal flag)     → big negative + done (agent removed)
+          - Lane invasion              → small negative (no auto-terminate)
+          - Moving while light is red  → medium negative
+          - Small step penalty         → encourage faster completion
 
         Returns
         -------
@@ -543,34 +543,92 @@ class Manager:
         dones = np.zeros(num_ctrl, dtype=bool)
 
         for i, agent in enumerate(self.controlled_agents):
-            # Default: alive, zero reward
+            # Agent missing or vehicle destroyed → treat as done with zero reward
             if agent is None or agent.vehicle is None:
-                # Agent has no vehicle → treat as already done
                 dones[i] = True
-                continue
-
-            # Map to global index to check active_flags
-            idx_all = self.vehicle_to_index.get(agent.vehicle.id, None)
-            if idx_all is None or not self.active_flags[idx_all]:
-                # Not active in global list → done
-                dones[i] = True
-                continue
-
-            # Collision-based termination
-            if agent.get_fatal_flag():
-                # Big negative reward on collision
-                rewards[i] = -10.0
-                dones[i] = True
-
-                # Clear its collision state and remove from world
-                self.remove_agent(agent)
-            else:
-                # Stay alive, zero reward for now
                 rewards[i] = 0.0
-                dones[i] = False
-        print(rewards)
-        print(dones)
+                continue
+
+            vehicle = agent.vehicle
+
+            # Check if this vehicle is still marked active in global structures
+            idx_all = self.vehicle_to_index.get(vehicle.id, None)
+            if idx_all is None or not self.active_flags[idx_all]:
+                dones[i] = True
+                rewards[i] = 0.0
+                continue
+
+            # ------------------------------------------------------------------
+            # Distance-based progress toward goal
+            # ------------------------------------------------------------------
+            destination = getattr(agent, "destination", vehicle.get_transform().location)
+            loc = vehicle.get_transform().location
+
+            dx = float(destination.x) - float(loc.x)
+            dy = float(destination.y) - float(loc.y)
+            dist = float(np.sqrt(dx * dx + dy * dy))
+
+            # previous distance stored on agent (per-episode)
+            dist_prev = getattr(agent, "prev_dist_to_goal", None)
+            if dist_prev is None:
+                dist_prev = dist
+            progress = dist_prev - dist  # > 0 if moving closer
+            agent.prev_dist_to_goal = dist
+
+            r = 0.0
+            # reward for progress
+            r += 1.0 * progress
+
+            done = False
+
+            # ------------------------------------------------------------------
+            # Goal reached
+            # ------------------------------------------------------------------
+            GOAL_RADIUS = 3.0  # meters
+            if dist < GOAL_RADIUS:
+                r += 100.0
+                done = True
+
+            # ------------------------------------------------------------------
+            # Collision penalty (using your fatal flag)
+            # ------------------------------------------------------------------
+            if agent.get_fatal_flag():
+                r -= 100.0
+                done = True
+                # Remove this agent (vehicle + sensors) from the world
+                self.remove_agent(agent)
+
+            # ------------------------------------------------------------------
+            # Lane invasion penalty (no terminate by default)
+            # ------------------------------------------------------------------
+            lane_inv_flag = bool(getattr(agent, "had_lane_invasion", False))
+            if lane_inv_flag:
+                r -= 5.0
+
+            # ------------------------------------------------------------------
+            # Red-light violation penalty
+            #   - simple: penalize moving faster than 0.5 m/s on red
+            # ------------------------------------------------------------------
+            vel = vehicle.get_velocity()
+            speed = float(np.sqrt(vel.x**2 + vel.y**2 + vel.z**2))
+
+            tl = vehicle.get_traffic_light()
+            if tl is not None and tl.get_state() == carla.TrafficLightState.Red:
+                if speed > 0.5:
+                    r -= 40.0
+                    # If you want, you *could* also terminate here:
+                    # done = True
+
+            # ------------------------------------------------------------------
+            # Small per-step time penalty
+            # ------------------------------------------------------------------
+            r -= 0.01
+
+            rewards[i] = float(r)
+            dones[i] = done
+
         return rewards, dones
+
 
     # Visualize Path for each controlled
     def visualize_path(self):
