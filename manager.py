@@ -206,23 +206,23 @@ class Manager:
 
         Core 10D vector:
             [speed_norm,
-             heading_err_norm,
-             rel_goal_x_norm,        # NEW: goal forward distance in ego frame
-             rel_goal_y_norm,        # NEW: goal lateral distance in ego frame
-             collision_flag,
-             lane_inv_flag,
-             traffic_light_red_flag,
-             at_junction_flag,
-             throttle_prev,
-             steer_prev]
+            heading_err_norm,
+            rel_goal_x_norm,        # goal in ego frame: forward
+            rel_goal_y_norm,        # goal in ego frame: left/right
+            collision_flag,
+            lane_inv_flag,
+            traffic_light_red_flag,
+            at_junction_flag,
+            throttle_prev,
+            steer_prev]
 
         Then we append:
             - flattened semantic segmentation (128x128), normalized to [0, 1]
+            using 13 semantic classes
             - flattened depth (128x128), clipped to [0, 100] m and normalized to [0, 1]
 
-        Final shape: (CMPE_OBS_DIM,) == 10 + 2 * 128 * 128 = 32778
+        Final shape: (CMPE_OBS_DIM,) == 10 + 2 * 128 * 128
         """
-
         # If agent/vehicle is gone → return all zeros
         if agent is None or getattr(agent, "vehicle", None) is None:
             return np.zeros(CMPE_OBS_DIM, dtype=np.float32)
@@ -248,7 +248,7 @@ class Manager:
         wp = amap.get_waypoint(
             loc,
             project_to_road=True,
-            lane_type=carla.LaneType.Driving
+            lane_type=carla.LaneType.Driving,
         )
 
         lane_yaw_rad = math.radians(wp.transform.rotation.yaw)
@@ -262,18 +262,16 @@ class Manager:
 
         # ------------------------------------------------------------------
         # 3) Relative goal in ego frame (rel_x, rel_y), both in [-1, 1]
+        #    IMPORTANT: use the same current goal as the reward function
         # ------------------------------------------------------------------
-        goal_location: carla.Location = getattr(agent, "destination", loc)
+        goal_location: carla.Location = self.get_current_goal_location(agent)
 
         # world-frame difference
         dx = float(goal_location.x) - float(loc.x)
         dy = float(goal_location.y) - float(loc.y)
 
-        # ego yaw (same as used for heading_err)
-        ego_yaw_rad = yaw_rad  # from above
-
-        cos_e = math.cos(ego_yaw_rad)
-        sin_e = math.sin(ego_yaw_rad)
+        cos_e = math.cos(yaw_rad)
+        sin_e = math.sin(yaw_rad)
 
         # rotate into ego frame: x forward, y left
         rel_x = cos_e * dx + sin_e * dy
@@ -287,12 +285,10 @@ class Manager:
             rel_y, MIN_REL_GOAL_COORD, MAX_REL_GOAL_COORD
         )
 
-
         # ------------------------------------------------------------------
         # 5) Flags: collision / lane invasion / traffic light / junction
         # ------------------------------------------------------------------
         collision_flag = 1.0 if agent.get_fatal_flag() else 0.0
-
         lane_inv_flag = 1.0 if getattr(agent, "had_lane_invasion", False) else 0.0
 
         tl = vehicle.get_traffic_light()
@@ -303,7 +299,7 @@ class Manager:
         at_junction_flag = 1.0 if wp.is_junction else 0.0
 
         # ------------------------------------------------------------------
-        # 6) Previous control (throttle, steer)
+        # 6) Previous control (throttle, steer) – works with your dict storage
         # ------------------------------------------------------------------
         prev_ctrl = getattr(agent, "last_control", None)
         if prev_ctrl is None:
@@ -313,10 +309,8 @@ class Manager:
             throttle_prev = float(prev_ctrl.get("throttle", 0.0))
             steer_prev = float(prev_ctrl.get("steer", 0.0))
         else:
-            # Fallback if you ever store a real carla.VehicleControl
             throttle_prev = float(getattr(prev_ctrl, "throttle", 0.0))
             steer_prev = float(getattr(prev_ctrl, "steer", 0.0))
-
 
         core_obs = np.array(
             [
@@ -337,46 +331,44 @@ class Manager:
         # ------------------------------------------------------------------
         # 7) Append seg + depth images (128x128 each)
         # ------------------------------------------------------------------
-        # Latest segmentation (H, W) int IDs / colors and depth (H, W) floats
         seg = agent.get_seg_latest() if hasattr(agent, "get_seg_latest") else None
         depth = agent.get_depth_latest() if hasattr(agent, "get_depth_latest") else None
 
         if seg is None or depth is None:
-            # If cameras haven't produced anything yet, append zeros
             seg_flat = np.zeros(SEG_DEPTH_H * SEG_DEPTH_W, dtype=np.float32)
             depth_flat = np.zeros(SEG_DEPTH_H * SEG_DEPTH_W, dtype=np.float32)
         else:
-            # Ensure numpy arrays with known dtypes
-            seg = np.asarray(seg, dtype=np.uint8)      # (H, W) in [0, 255]
-            depth = np.asarray(depth, dtype=np.float32)  # (H, W) depth in meters
+            # seg: int labels, CARLA doc says 13 classes → IDs in [0, 12]
+            seg = np.asarray(seg, dtype=np.int32)
+            depth = np.asarray(depth, dtype=np.float32)
 
-            # Check shapes match what the CNN expects
             assert seg.shape == (SEG_DEPTH_H, SEG_DEPTH_W), \
                 f"seg shape {seg.shape} != {(SEG_DEPTH_H, SEG_DEPTH_W)}"
             assert depth.shape == (SEG_DEPTH_H, SEG_DEPTH_W), \
                 f"depth shape {depth.shape} != {(SEG_DEPTH_H, SEG_DEPTH_W)}"
 
             # --- Segmentation normalization ---
-            # Assuming CARLA’s seg image is already in [0, 255] (palette/colors),
-            # scale to [0, 1] for the CNN.
-            seg_norm = seg.astype(np.float32) / 255.0    # → [0, 1]
+            # 13 classes → labels in [0, 12], map to [0, 1]
+            max_label = 12.0
+            seg_norm = np.clip(seg.astype(np.float32), 0.0, max_label) / max_label
 
             # --- Depth normalization ---
-            # Clip to [0, 100] meters and scale to [0, 1].
             depth_cap = 100.0
             depth_clipped = np.clip(depth, 0.0, depth_cap)
-            depth_norm = depth_clipped / depth_cap       # → [0, 1]
+            depth_norm = depth_clipped / depth_cap  # [0, 1]
 
             seg_flat = seg_norm.reshape(-1).astype(np.float32)
             depth_flat = depth_norm.reshape(-1).astype(np.float32)
 
         full_obs = np.concatenate([core_obs, seg_flat, depth_flat], axis=0)
+
         if full_obs.shape[0] != CMPE_OBS_DIM:
             raise ValueError(
                 f"CMPE obs dim mismatch: got {full_obs.shape[0]}, expected {CMPE_OBS_DIM}"
             )
 
         return full_obs
+
 
 
     
