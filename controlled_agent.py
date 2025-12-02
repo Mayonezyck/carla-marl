@@ -77,36 +77,74 @@ class Controlled_Agents(Agent):
         
 
     def _add_other_sensors(self):
+        """
+        Add non-learning sensors such as collision and lane-invasion.
+        """
+        # ----------------------------
+        # Collision sensor
+        # ----------------------------
         collision_sensor = self._add_collision_sensor()
 
         def collision_callback(event: carla.CollisionEvent):
             def _check_fatal(event: carla.CollisionEvent):
-                #Label any collision as fatal
+                # Label any collision as fatal for now
                 return True
+
             actor_we_collided_with = event.other_actor
             impulse = event.normal_impulse  # carla.Vector3D
             intensity = (impulse.x**2 + impulse.y**2 + impulse.z**2)**0.5
+
             self._collision_event.append(event)
             self._had_collision = True
             if _check_fatal(event):
                 self._fatal_collision = True
+
             print(f"[COLLISION] with {actor_we_collided_with.type_id}, intensity={intensity:.2f}")
-        
+
         collision_sensor.listen(collision_callback)
         self.sensors.append(collision_sensor)
 
-        lane_inv_sensor = self._add_lane_invasion_sensor()
+        # ----------------------------
+        # Lane invasion sensor
+        # ----------------------------
+        lane_sensor = self._add_lane_invasion_sensor()
 
-        def lane_inv_callback(event: carla.LaneInvasionEvent):
-            self._lane_invasion_events.append(event)
-            self.had_lane_invasion = True
+        def lane_invasion_callback(event: carla.LaneInvasionEvent):
+            """
+            Only set had_lane_invasion for ILLEGAL crossings:
+              - solid / double-solid / solid-broken / broken-solid
+            Crossing broken lines is considered legal and ignored.
+            """
+            # If there are no markings, be conservative and ignore
+            if not event.crossed_lane_markings:
+                return
 
-            # Optional debug
-            types = [str(marking.type) for marking in event.crossed_lane_markings]
-            print(f"[LANE INVASION] crossed: {types}")
+            illegal = False
 
-        lane_inv_sensor.listen(lane_inv_callback)
-        self.sensors.append(lane_inv_sensor)
+            for marking in event.crossed_lane_markings:
+                mtype = marking.type
+
+                # Allowed (no penalty): broken or broken-broken
+                if mtype in (
+                    carla.LaneMarkingType.Broken,
+                    carla.LaneMarkingType.BrokenBroken,
+                ):
+                    continue
+
+                # Everything else we treat as illegal:
+                #   Solid, SolidSolid, SolidBroken, BrokenSolid, Other, etc.
+                illegal = True
+                break
+
+            if illegal:
+                self.had_lane_invasion = True
+                print("[LANE INVASION] Illegal lane crossing detected (solid marking).")
+            else:
+                # Debug message if you want to see legal crossings
+                print("[LANE INVASION] Crossing broken line (no penalty).")
+
+        lane_sensor.listen(lane_invasion_callback)
+        self.sensors.append(lane_sensor)
 
 
     def _setup_forward_camera(self) -> None:
@@ -182,21 +220,28 @@ class Controlled_Agents(Agent):
         )
         return collision_sensor
             
-    def _add_lane_invasion_sensor(self) -> carla.Actor:
+    def _add_lane_invasion_sensor(self):
+        """
+        Attach a lane invasion sensor to the vehicle.
+        """
+        if self.vehicle is None:
+            return None
+
         blueprint_library = self.world.get_blueprint_library()
-        lane_inv_bp = blueprint_library.find('sensor.other.lane_invasion')
+        lane_bp = blueprint_library.find("sensor.other.lane_invasion")
 
         transform = carla.Transform(
-            carla.Location(x=0.0, y=0.0, z=2.0),
+            carla.Location(x=0.0, y=0.0, z=1.0),
             carla.Rotation()
         )
 
-        lane_inv_sensor = self.world.spawn_actor(
-            lane_inv_bp,
+        lane_sensor = self.world.spawn_actor(
+            lane_bp,
             transform,
             attach_to=self.vehicle
         )
-        return lane_inv_sensor
+
+        return lane_sensor
 
     
 
