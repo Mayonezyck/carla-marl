@@ -14,21 +14,29 @@ import shutil
 
 def decode_continuous_actions(raw_actions: np.ndarray) -> np.ndarray:
     """
-    raw_actions: (N, 2) in [-1, 1]
+    Now PPO has action_dim = 1 and Manager has its own throttle controller.
+
+    raw_actions: (N, 1) or (N,) in [-1, 1]
         raw[:, 0] = steer
-        raw[:, 1] = accel
 
-    Returns (N, 3): throttle, steer, brake
+    Returns:
+        (N,) or (N, 1) array that Manager will interpret as steering.
+        Throttle / brake are computed in Manager._compute_throttle_brake().
     """
-    steer = np.clip(raw_actions[:, 0], -1.0, 1.0)
-    accel = np.clip(raw_actions[:, 1], -1.0, 1.0)
+    raw_actions = np.asarray(raw_actions, dtype=np.float32)
 
-    throttle = np.clip(accel, 0.0, 1.0)
-    brake = np.clip(-accel, 0.0, 1.0)
-
-    actions = np.stack([throttle, steer, brake], axis=-1)
-    return actions.astype(np.float32)
-
+    # Allow both (N,) and (N,1) shapes
+    if raw_actions.ndim == 1:
+        # (N,) → just return as-is
+        return raw_actions
+    elif raw_actions.ndim == 2 and raw_actions.shape[1] == 1:
+        # (N,1) → also fine
+        return raw_actions
+    else:
+        # If somehow something else comes in, be defensive:
+        # take the first column as steer.
+        steer = raw_actions[..., 0]
+        return np.asarray(steer, dtype=np.float32)
 
 def main():
     print("[PPO] Loading config...")
@@ -67,16 +75,16 @@ def main():
     print("[PPO] Building PPO policy...")
     policy = PPOPolicy(
         obs_dim=CMPE_OBS_DIM,
-        action_dim=2,          # (steer, accel)
+        action_dim=1,          # (steer)
         cmpe_dim=10,
         img_channels=2,
         img_height=128,
         img_width=128,
-        lr=3e-4,
+        lr=1e-4,
         gamma=0.99,
         lam=0.95,
         clip_eps=0.2,
-        ent_coef=0.0,
+        ent_coef=0.05,
         vf_coef=0.5,
         max_grad_norm=0.5,
         device=None,
@@ -128,7 +136,9 @@ def main():
                 )
 
                 # Convert to CARLA controls
+                print(actions_np)
                 carla_actions = decode_continuous_actions(actions_np)
+                print(carla_actions)
                 world.manager.apply_actions_to_controlled(carla_actions)
 
                 # Step CARLA
@@ -139,6 +149,11 @@ def main():
 
                 # Rewards and dones
                 rewards, dones = world.manager.get_rewards_and_dones()  # (N,), (N,)
+                if np.all(dones):
+                    # All agents are done this step → end this episode.
+                    # Either break the rollout here:
+                    break
+
 
                 # ---------- Pygame visualization ----------
                 for event in pygame.event.get():

@@ -2,6 +2,8 @@ from config import ConfigLoader
 from controlled_agent import Controlled_Agents
 from free_agent import Free_Agents  # adjust import path as needed
 from road_points import RoadPointExtractor
+from RL_handler import SEG_DEPTH_H, SEG_DEPTH_W, CMPE_OBS_DIM
+
 
 import math
 import numpy as np
@@ -17,10 +19,6 @@ MAX_VEH_LEN = 30.0
 MAX_VEH_WIDTH = 15.0
 MIN_REL_GOAL_COORD = -100.0
 MAX_REL_GOAL_COORD = 100.0
-SEG_DEPTH_H = 128
-SEG_DEPTH_W = 128
-#CMPE_OBS_DIM = 10 + 2 * SEG_DEPTH_H * SEG_DEPTH_W
-CMPE_OBS_DIM = 10 
 
 
 def normalize_min_max_np(x: float, min_val: float, max_val: float) -> float:
@@ -82,6 +80,7 @@ class Manager:
             "idle_pen": 0.0,
             "speed_pen": 0.0,
             "steer_pen": 0.0,
+            "steer_sustain": 0.0,   
             "intermediate": 0.0,
             "final": 0.0,
             "collision": 0.0,
@@ -422,47 +421,47 @@ class Manager:
             dtype=np.float32,
         )
 
-        # # ------------------------------------------------------------------
-        # # 7) Append seg + depth images (128x128 each)
-        # # ------------------------------------------------------------------
-        # seg = agent.get_seg_latest() if hasattr(agent, "get_seg_latest") else None
-        # depth = agent.get_depth_latest() if hasattr(agent, "get_depth_latest") else None
+        # ------------------------------------------------------------------
+        # 7) Append seg + depth images (128x128 each)
+        # ------------------------------------------------------------------
+        seg = agent.get_seg_latest() if hasattr(agent, "get_seg_latest") else None
+        depth = agent.get_depth_latest() if hasattr(agent, "get_depth_latest") else None
 
-        # if seg is None or depth is None:
-        #     seg_flat = np.zeros(SEG_DEPTH_H * SEG_DEPTH_W, dtype=np.float32)
-        #     depth_flat = np.zeros(SEG_DEPTH_H * SEG_DEPTH_W, dtype=np.float32)
-        # else:
-        #     # seg: int labels, CARLA doc says 13 classes → IDs in [0, 12]
-        #     seg = np.asarray(seg, dtype=np.int32)
-        #     depth = np.asarray(depth, dtype=np.float32)
+        if seg is None or depth is None:
+            seg_flat = np.zeros(SEG_DEPTH_H * SEG_DEPTH_W, dtype=np.float32)
+            depth_flat = np.zeros(SEG_DEPTH_H * SEG_DEPTH_W, dtype=np.float32)
+        else:
+            # seg: int labels, CARLA doc says 13 classes → IDs in [0, 12]
+            seg = np.asarray(seg, dtype=np.int32)
+            depth = np.asarray(depth, dtype=np.float32)
 
-        #     assert seg.shape == (SEG_DEPTH_H, SEG_DEPTH_W), \
-        #         f"seg shape {seg.shape} != {(SEG_DEPTH_H, SEG_DEPTH_W)}"
-        #     assert depth.shape == (SEG_DEPTH_H, SEG_DEPTH_W), \
-        #         f"depth shape {depth.shape} != {(SEG_DEPTH_H, SEG_DEPTH_W)}"
+            assert seg.shape == (SEG_DEPTH_H, SEG_DEPTH_W), \
+                f"seg shape {seg.shape} != {(SEG_DEPTH_H, SEG_DEPTH_W)}"
+            assert depth.shape == (SEG_DEPTH_H, SEG_DEPTH_W), \
+                f"depth shape {depth.shape} != {(SEG_DEPTH_H, SEG_DEPTH_W)}"
 
-        #     # --- Segmentation normalization ---
-        #     # 13 classes → labels in [0, 12], map to [0, 1]
-        #     max_label = 12.0
-        #     seg_norm = np.clip(seg.astype(np.float32), 0.0, max_label) / max_label
+            # --- Segmentation normalization ---
+            # 13 classes → labels in [0, 12], map to [0, 1]
+            max_label = 12.0
+            seg_norm = np.clip(seg.astype(np.float32), 0.0, max_label) / max_label
 
-        #     # --- Depth normalization ---
-        #     depth_cap = 100.0
-        #     depth_clipped = np.clip(depth, 0.0, depth_cap)
-        #     depth_norm = depth_clipped / depth_cap  # [0, 1]
+            # --- Depth normalization ---
+            depth_cap = 100.0
+            depth_clipped = np.clip(depth, 0.0, depth_cap)
+            depth_norm = depth_clipped / depth_cap  # [0, 1]
 
-        #     seg_flat = seg_norm.reshape(-1).astype(np.float32)
-        #     depth_flat = depth_norm.reshape(-1).astype(np.float32)
+            seg_flat = seg_norm.reshape(-1).astype(np.float32)
+            depth_flat = depth_norm.reshape(-1).astype(np.float32)
 
-        # full_obs = np.concatenate([core_obs, seg_flat, depth_flat], axis=0)
+        full_obs = np.concatenate([core_obs, seg_flat, depth_flat], axis=0)
 
-        # if full_obs.shape[0] != CMPE_OBS_DIM:
-        #     raise ValueError(
-        #         f"CMPE obs dim mismatch: got {full_obs.shape[0]}, expected {CMPE_OBS_DIM}"
-        #     )
+        if full_obs.shape[0] != CMPE_OBS_DIM:
+            raise ValueError(
+                f"CMPE obs dim mismatch: got {full_obs.shape[0]}, expected {CMPE_OBS_DIM}"
+            )
 
-        #return full_obs
-        return core_obs
+        return full_obs
+        #return core_obs
 
 
     
@@ -622,13 +621,54 @@ class Manager:
         )
 
         return obs
+    
+    def _compute_throttle_brake(
+        self,
+        agent,
+        target_speed_mps: float = 8.0,
+    ) -> Tuple[float, float]:
+        """
+        Very simple hand-coded longitudinal controller:
+        - Tries to keep the vehicle around target_speed_mps.
+        - Returns (throttle, brake) in [0, 1].
 
-    def apply_actions_to_controlled(self, actions: Sequence[Sequence[float]]) -> None:
+        You can later tune target_speed_mps or make it depend on context.
+        """
+        vehicle = getattr(agent, "vehicle", None)
+        if vehicle is None:
+            return 0.0, 0.0
+
+        vel = vehicle.get_velocity()
+        speed = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
+
+        # Speed error
+        err = target_speed_mps - speed  # >0: we are too slow; <0: too fast
+
+        # Simple piecewise “P controller”
+        if err > 0.0:
+            # Need to accelerate
+            # Base throttle + proportional term
+            throttle = 0.3 + 0.1 * err
+            brake = 0.0
+        else:
+            # Too fast → no throttle, some brake
+            throttle = 0.0
+            brake = -0.2 * err  # err is negative here
+
+        # Clamp to valid range
+        throttle = float(np.clip(throttle, 0.0, 1.0))
+        brake = float(np.clip(brake, 0.0, 1.0))
+
+        return throttle, brake
+
+    def apply_actions_to_controlled(self, actions: Sequence) -> None:
         """
         Apply actions to all controlled agents.
 
-        actions: iterable of (throttle, steer, brake) for each controlled agent,
-                 in the same order as self.controlled_agents.
+        Phase 1: RL only controls STEERING.
+        - PPO might still output 3D actions [throttle, steer, brake].
+        - We extract steer from the action and ignore the rest.
+        - Throttle / brake are computed by a hand-coded speed controller.
         """
         if len(actions) != len(self.controlled_agents):
             print(
@@ -640,24 +680,51 @@ class Manager:
         for agent, act in zip(self.controlled_agents, actions):
             if agent is None or agent.vehicle is None:
                 continue
-            try:
-                # ensure it's a 3-tuple
-                throttle = float(act[0])
-                steer    = float(act[1])
-                brake    = float(act[2])
 
-                # store last_control so CMPE obs can read it
+            try:
+                # Convert to numpy array for uniform handling
+                act_np = np.asarray(act, dtype=np.float32)
+
+                # ---- Extract steering from action ----
+                if act_np.ndim == 0:
+                    # Single scalar (already "just steer")
+                    raw_steer = float(act_np)
+                elif act_np.ndim == 1:
+                    if act_np.shape[0] == 1:
+                        # shape (1,) -> one value, treat as steer
+                        raw_steer = float(act_np[0])
+                    else:
+                        # shape (3,) like [throttle, steer, brake]
+                        # we take index 1 as STEERING
+                        raw_steer = float(act_np[1])
+                else:
+                    print(f"[Manager] Unexpected action shape {act_np.shape}, skipping agent {agent.index}")
+                    continue
+
+                # Clamp steering to [-1, 1]
+                steer = float(np.clip(raw_steer, -1.0, 1.0))
+
+                # ---- Hand-coded longitudinal controller (throttle / brake) ----
+                throttle, brake = self._compute_throttle_brake(
+                    agent,
+                    target_speed_mps=8.0,
+                )
+
+                # Optional debug:
+                # print(f"[Manager] agent {agent.index}: steer={steer:.3f}, throttle={throttle:.3f}, brake={brake:.3f}")
+
+                # Store last_control so obs / reward code can use it
                 agent.last_control = {
                     "throttle": throttle,
                     "steer": steer,
                     "brake": brake,
                 }
 
-                # actually apply control using your existing helper
+                # Apply to CARLA
                 agent.apply_action((throttle, steer, brake))
 
             except Exception as e:
-                print("[Manager] Error applying action to agent {}: {}".format(agent.index, e))
+                print(f"[Manager] Error applying action to agent {getattr(agent, 'index', '?')}: {e}")
 
 
 
@@ -715,26 +782,39 @@ class Manager:
 
         # ---- global tuning knobs ----
         # Weaker emphasis on "distance change" / speed:
-        W_FORWARD = 0.3           # was 1.0
-        W_BACKWARD = 1.0          # still punish going away, but not insanely
+        W_FORWARD = 1.0           # was 1.0
+        W_BACKWARD = 3.0           # still punish going away, but not insanely
         MAX_IDLE_STEPS = 20
         IDLE_PENALTY = 1.0
         NO_PROGRESS_DONE_STEPS = 80  # still unused
 
-        LANE_CENTER_PENALTY_SCALE = 0.4  # << tune this
+        LANE_CENTER_PENALTY_SCALE = 1.5  # << tune this
 
         # Steering robustness: make steering clearly expensive
-        STEER_MAG_PENALTY = 0.12  # was 0.05 → much stronger
+        STEER_MAG_PENALTY = 0.08  # was 0.05 → much stronger
+
+        # NEW: sustained high-steer penalty
+        HIGH_STEER_THRESH = 0.7        # |steer| above this is considered "hard turn"
+        HIGH_STEER_MIN_STEPS = 10      # must sustain for at least N consecutive steps
+        HIGH_STEER_BASE = 0.2          # base penalty once threshold is exceeded
+        HIGH_STEER_GROWTH = 0.05       # extra per step beyond MIN_STEPS
+        HIGH_STEER_MAX_MULT = 10       # safety cap on growth (optional)
+
 
         # Line-following shaping
         # Less reward just for "going fast along the line"
-        ALONG_REWARD_SCALE = 0.02   # was 0.05
+        ALONG_REWARD_SCALE = 0   # was 0.05
         LAT_PENALTY_SCALE  = 0.15   # slightly stronger lateral penalty
         V_ALONG_CAP        = 8.
         
         # NEW: distance penalty parameters
-        DIST_PENALTY_SCALE = 0.01   # per-meter penalty when far
+        DIST_PENALTY_SCALE = 0.00   # per-meter penalty when far
         DIST_PENALTY_MIN_DIST = 10.0  # don't penalize when already close
+
+        GOAL_RADIUS = 3.0  # meters
+        INTERMEDIATE_REWARD = 50.0
+        FINAL_REWARD = 300.0
+
 
 
         # Stage-based time penalty
@@ -875,7 +955,7 @@ class Manager:
                 # Prefer moderate speeds; penalize going too fast.
                 SPEED_COMFORT = 8.0        # m/s (~30 km/h)
                 SPEED_HARD_CAP = 15.0      # beyond this we don't care about extra speed
-                SPEED_PENALTY_SCALE = 0.05
+                SPEED_PENALTY_SCALE = 0.0
 
                 if speed > SPEED_COMFORT:
                     # excess above comfort, clipped
@@ -955,13 +1035,13 @@ class Manager:
 
                 # Hard terminate on no progress: currently disabled,
                 # but you can re-enable if you want.
-                # if idle_steps > NO_PROGRESS_DONE_STEPS and dist > 10.0:
-                #     done = True
-                #     extra_pen = 5.0
-                #     r -= extra_pen
-                #     events.append(f"-{extra_pen:.2f} terminate: no progress")
+                if idle_steps > NO_PROGRESS_DONE_STEPS and dist > 10.0:
+                    done = True
+                    extra_pen = 20.0
+                    r -= extra_pen
+                    events.append(f"-{extra_pen:.2f} terminate: no progress")
 
-                # ---------------- Steering penalty ----------------
+                                # ---------------- Steering penalty ----------------
                 # Discourages tight circles: large |steer| over time is costly.
                 prev_ctrl = getattr(agent, "last_control", None)
                 if prev_ctrl is not None:
@@ -970,21 +1050,48 @@ class Manager:
                     else:
                         steer_val = float(getattr(prev_ctrl, "steer", 0.0))
 
-                    steer_pen = STEER_MAG_PENALTY * abs(steer_val)
+                    abs_steer = abs(steer_val)
+
+                    # Instantaneous magnitude penalty (existing behavior)
+                    steer_pen = STEER_MAG_PENALTY * abs_steer
                     if steer_pen > 0.0:
                         r -= steer_pen
                         self._accum_reward("steer_pen", -steer_pen)
                         events.append(f"-{steer_pen:.2f} steer penalty")
+
+                    # -------- NEW: sustained high-steer penalty --------
+                    # Track how many *consecutive* steps steering is above threshold
+                    high_steer_steps = getattr(agent, "high_steer_steps", 0)
+
+                    if abs_steer > HIGH_STEER_THRESH:
+                        high_steer_steps += 1
+                    else:
+                        high_steer_steps = 0
+
+                    agent.high_steer_steps = high_steer_steps
+
+                    if high_steer_steps >= HIGH_STEER_MIN_STEPS:
+                        # Number of steps beyond the minimum window
+                        extra_steps = high_steer_steps - HIGH_STEER_MIN_STEPS + 1
+                        extra_steps = min(extra_steps, HIGH_STEER_MAX_MULT)
+
+                        # Penalty grows with time spent in high steering
+                        sustain_pen = HIGH_STEER_BASE + HIGH_STEER_GROWTH * extra_steps
+
+                        r -= sustain_pen
+                        self._accum_reward("steer_sustain", -sustain_pen)
+                        events.append(
+                            f"-{sustain_pen:.2f} sustained high steer "
+                            f"(steps={high_steer_steps})"
+                        )
+
 
                 # ------------------------------------------------------------------
                 # Goal reached logic:
                 #   - intermediate waypoint → small reward + advance wp index
                 #   - final waypoint (or no route) → big reward + done
                 # ------------------------------------------------------------------
-                GOAL_RADIUS = 3.0  # meters
-                INTERMEDIATE_REWARD = 10.0
-                FINAL_REWARD = 100.0
-
+                
                 if dist < GOAL_RADIUS and not done:
                     if use_route and not is_final_goal:
                         # Reached an intermediate waypoint
@@ -1028,15 +1135,16 @@ class Manager:
 
                     elif self.reward_stage == 2:
                         # Stage 2: soft penalty, non-fatal
-                        r -= 10.0
-                        self._accum_reward("lane_soft", -10.0)
+                        r -= 50.0
+                        self._accum_reward("lane_soft", -20.0)
+                        print('lane crossing -20')
                         events.append("-10.00 lane invasion (stage 2)")
                         agent.had_lane_invasion = False
 
                     elif self.reward_stage >= 3:
                         # Stage 3+: fatal penalty, remove agent
-                        r -= 50.0
-                        self._accum_reward("lane_fatal", -50.0)
+                        r -= 500.0
+                        self._accum_reward("lane_fatal", -500.0)
                         done = True
                         events.append("-50.00 lane invasion (stage 3)")
                         print("Lane invasion, fatal in stage 3")
