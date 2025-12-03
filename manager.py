@@ -121,6 +121,41 @@ class Manager:
             self.reward_stats[k] = 0.0
         self.reward_stats["steps"] = 0.0
 
+    def _segment_offset(self,
+                        point: carla.Location,
+                        start: carla.Location,
+                        end: carla.Location) -> float:
+        """
+        Distance (in meters) from `point` to the line *segment* joining
+        `start` and `end` (all carla.Location). Uses 2D (x, y).
+        """
+        ax, ay = float(start.x), float(start.y)
+        bx, by = float(end.x), float(end.y)
+        px, py = float(point.x), float(point.y)
+
+        abx = bx - ax
+        aby = by - ay
+        ab_len2 = abx * abx + aby * aby
+        if ab_len2 < 1e-6:
+            # Degenerate segment → treat offset as 0
+            return 0.0
+
+        apx = px - ax
+        apy = py - ay
+
+        # Projection of AP onto AB, normalized by |AB|^2
+        t = (apx * abx + apy * aby) / ab_len2
+        # Clamp to segment [0, 1]
+        t = max(0.0, min(1.0, t))
+
+        cx = ax + t * abx
+        cy = ay + t * aby
+
+        dx = px - cx
+        dy = py - cy
+        return float(math.sqrt(dx * dx + dy * dy))
+
+
     # --------------------------------------------------
     # Spawning
     # --------------------------------------------------
@@ -461,7 +496,7 @@ class Manager:
             )
 
         return full_obs
-        #return core_obs
+        # return core_obs
 
 
     
@@ -670,6 +705,7 @@ class Manager:
         - We extract steer from the action and ignore the rest.
         - Throttle / brake are computed by a hand-coded speed controller.
         """
+
         if len(actions) != len(self.controlled_agents):
             print(
                 "[Manager] Warning: got {} actions for {} controlled agents.".format(
@@ -707,7 +743,7 @@ class Manager:
                 # ---- Hand-coded longitudinal controller (throttle / brake) ----
                 throttle, brake = self._compute_throttle_brake(
                     agent,
-                    target_speed_mps=8.0,
+                    target_speed_mps=2.0,
                 )
 
                 # Optional debug:
@@ -761,37 +797,46 @@ class Manager:
 
     def get_rewards_and_dones(self):
         """
-        Simplified, SelfDrive-style reward:
+        Simplified reward with normalized progress:
 
-          + progress towards current goal
+          progress_norm = (dist_prev - dist_current) / initial_final_dist
+
+        where initial_final_dist is the straight-line distance from the
+        agent's spawn position to its final destination, stored per-agent
+        as `initial_final_goal_dist`.
+
+        Kept terms:
+          + normalized progress towards current goal
           + intermediate waypoint reward
           + final goal reward
           - collision penalty (fatal)
           - optional lane-fatal penalty (stage >= 3)
           - small per-step time penalty
-
-        All other shaping terms (distance penalty, lateral penalty, steering,
-        idle, etc.) are disabled to make learning easier to debug.
         """
         num_ctrl = len(self.controlled_agents)
         rewards = np.zeros(num_ctrl, dtype=np.float32)
         dones = np.zeros(num_ctrl, dtype=bool)
 
         # ---- main hyper-parameters ----
-        W_PROGRESS = 1.0          # scale for "getting closer"
-        GOAL_RADIUS = 3.0         # meters
-        INTERMEDIATE_REWARD = 50.0
-        FINAL_REWARD = 300.0
-        COLLISION_PENALTY = -50.0
-        LANE_FATAL_PENALTY = -500.0
+        W_PROGRESS = 10.0          # scale for normalized progress
+        GOAL_RADIUS = 3.0       # meters
+        INTERMEDIATE_REWARD = 100
+        STEER_PENALTY_SCALE = 0.0005
+        FINAL_REWARD = 5000
+        COLLISION_PENALTY = -500
+        LANE_FATAL_PENALTY = -500
+        SEG_SAFE_RADIUS = 1.5          # meters of “free” corridor
+        SEG_PENALTY_SCALE = 0       # overall strength
+        SEG_PENALTY_ALPHA = 0.2        # exponential growth rate
+
 
         # Stage-based time penalty (same as before)
         if self.reward_stage == 1:
-            time_pen = 0.01
+            time_pen = 0
         elif self.reward_stage == 2:
-            time_pen = 0.015
+            time_pen = 0
         else:  # stage 3+
-            time_pen = 0.02
+            time_pen = 0
 
         for i, agent in enumerate(self.controlled_agents):
             # Count step for stats
@@ -833,6 +878,16 @@ class Manager:
                 # Use same logic as observations to get the current goal location.
                 goal_loc = self.get_current_goal_location(agent)
 
+                seg_prev = getattr(agent, "segment_prev_goal", None)
+                seg_curr = getattr(agent, "segment_curr_goal", None)
+
+                if seg_prev is None or seg_curr is None:
+                    # First time: start from current location to current goal
+                    seg_prev = loc
+                    seg_curr = goal_loc
+                    agent.segment_prev_goal = seg_prev
+                    agent.segment_curr_goal = seg_curr
+
                 # After calling get_current_goal_location, current_wp_index may
                 # have changed. Recompute route / is_final_goal consistently.
                 route = getattr(agent, "current_waypoint_plan", None)
@@ -845,23 +900,73 @@ class Manager:
                     use_route = False
                     is_final_goal = True
 
-                # Distance to current goal
+                # Distance to *current* goal (intermediate or final)
                 dx = float(goal_loc.x) - float(loc.x)
                 dy = float(goal_loc.y) - float(loc.y)
                 dist = float(np.sqrt(dx * dx + dy * dy))
 
-                # ---------------- Progress toward goal (main signal) ----------------
+                # ---------------- Initial distance to FINAL destination ----------------
+                # We normalize progress by the *episode-long* distance from spawn
+                # to the FINAL destination, not a fixed global range.
+                final_dest = getattr(agent, "destination", goal_loc)
+                dx_f = float(final_dest.x) - float(loc.x)
+                dy_f = float(final_dest.y) - float(loc.y)
+                dist_to_final = float(np.sqrt(dx_f * dx_f + dy_f * dy_f))
+
+                initial_final_dist = getattr(agent, "initial_final_goal_dist", None)
+                if initial_final_dist is None:
+                    # Set once per episode; avoid division by zero
+                    initial_final_dist = max(dist_to_final, 1e-3)
+                    agent.initial_final_goal_dist = initial_final_dist
+
+                # ---------------- Progress toward current goal ----------------
+                # Store previous distance to the current goal (can be intermediate).
                 dist_prev = getattr(agent, "prev_dist_to_goal", None)
                 if dist_prev is None:
                     dist_prev = dist
-                progress = dist_prev - dist           # > 0 if moving closer
+                progress_raw = dist_prev - dist  # > 0 if moving closer
                 agent.prev_dist_to_goal = dist
 
-                if progress > 0.0:
-                    contrib = W_PROGRESS * progress
+                # Normalize by initial_final_dist (spawn → final destination)
+                progress_norm = 0.0
+                if initial_final_dist > 1e-3:
+                    progress_norm = progress_raw / initial_final_dist
+
+                if progress_norm > 0.0:
+                    contrib = W_PROGRESS * progress_norm
                     r += contrib
                     self._accum_reward("progress", contrib)
-                    events.append(f"+{contrib:.2f} progress")
+                    events.append(f"+{contrib:.4f} progress_norm")
+
+                # ---------------- Steering penalty (small, quadratic) ----------------
+                prev_ctrl = getattr(agent, "last_control", None)
+                if prev_ctrl is not None:
+                    if isinstance(prev_ctrl, dict):
+                        steer_val = float(prev_ctrl.get("steer", 0.0))
+                    else:
+                        steer_val = float(getattr(prev_ctrl, "steer", 0.0))
+
+                    steer_pen = STEER_PENALTY_SCALE * (steer_val ** 2)
+                    if steer_pen > 0.0:
+                        r -= steer_pen
+                        self._accum_reward("steer_pen", -steer_pen)
+                        events.append(f"-{steer_pen:.4f} steer^2")
+                
+                #------------------ Segment Offset
+                seg_offset = self._segment_offset(loc, seg_prev, seg_curr)
+
+                if seg_offset > SEG_SAFE_RADIUS:
+                    excess = seg_offset - SEG_SAFE_RADIUS
+                    # Exponential growth: ~0 near corridor edge, grows fast when far
+                    seg_pen = SEG_PENALTY_SCALE * (math.exp(SEG_PENALTY_ALPHA * excess) - 1.0)
+                    r -= seg_pen
+                    # Reuse "lat_pen" bucket in reward_stats for logging
+                    self._accum_reward("lat_pen", -seg_pen)
+                    events.append(
+                        f"-{seg_pen:.3f} segment dev (d={seg_offset:.2f})"
+                    )   
+
+                    
 
                 # ---------------- Goal reached logic ----------------
                 if dist < GOAL_RADIUS and not done:
@@ -870,9 +975,18 @@ class Manager:
                         r += INTERMEDIATE_REWARD
                         self._accum_reward("intermediate", INTERMEDIATE_REWARD)
                         events.append(f"+{INTERMEDIATE_REWARD:.2f} intermediate goal")
-                        # Advance to next waypoint
+
+                        # Advance to next waypoint in the route
                         agent.current_wp_index = wp_idx + 1
                         agent.prev_dist_to_goal = None
+                        agent.idle_norm_steps = 0
+
+                        # Update segment: previous = old goal, current = new goal
+                        old_goal_loc = goal_loc
+                        new_goal_loc = self.get_current_goal_location(agent)
+                        agent.segment_prev_goal = old_goal_loc
+                        agent.segment_curr_goal = new_goal_loc
+
                     else:
                         # Reached the final goal
                         r += FINAL_REWARD
@@ -882,6 +996,7 @@ class Manager:
                         setattr(agent, "reached_final_goal", True)
                         agent.prev_dist_to_goal = None
                         self.remove_agent(agent)
+
 
                 # ---------------- Collision penalty ----------------
                 if agent.get_fatal_flag() and not done:
@@ -904,8 +1019,13 @@ class Manager:
                         print("Lane invasion, fatal in stage 3+")
                         self.remove_agent(agent)
                     else:
-                        # Stage 1–2: just log & clear flag
-                        events.append("lane invasion (ignored at this stage)")
+                        # always treat lane invasion bad
+                        r += LANE_FATAL_PENALTY
+                        self._accum_reward("lane_fatal", LANE_FATAL_PENALTY)
+                        done = True
+                        events.append(f"{LANE_FATAL_PENALTY:.2f} lane invasion (fatal)")
+                        print("Lane invasion, fatal in stage 3+")
+                        self.remove_agent(agent)
                     agent.had_lane_invasion = False
 
                 # ---------------- Per-step time penalty ----------------
@@ -925,6 +1045,7 @@ class Manager:
                 dones[i] = True
                 self.remove_agent(agent)
 
+        print("[RLHandler] rewards from manager:", rewards)   # TEMP debug
         return rewards, dones
 
 

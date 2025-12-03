@@ -23,6 +23,7 @@ class Agent:
         index: int,
         config: Dict[str, Any],
         role_prefix: str,
+        seed: int
     ):
         self.world = world
         self.index = index
@@ -30,7 +31,7 @@ class Agent:
         self.role_prefix = role_prefix
         self.starting_point = None
         self.destination = None
-
+        random.seed(seed)
 
         self.vehicle: Optional[carla.Actor] = None
         self.sensors: List[carla.Actor] = []
@@ -93,7 +94,7 @@ class Agent:
                 self.destination = self._pick_nearby_destination(
                     world=self.world,
                     start_location=self.starting_point,
-                    min_distance=50.0,   # tweak as you like
+                    min_distance=250.0,   # tweak as you like
                     step=2.0,
                 )
                 dest = self.destination

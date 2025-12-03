@@ -80,7 +80,7 @@ def main():
         img_channels=2,
         img_height=128,
         img_width=128,
-        lr=1e-4,
+        lr=3e-4,
         gamma=0.99,
         lam=0.95,
         clip_eps=0.2,
@@ -90,7 +90,7 @@ def main():
         device=None,
     )
 
-    rollout_horizon = 512
+    rollout_horizon = 1024
     num_updates = 1000
     ppo_epochs = 4
     ppo_batch_size = 64
@@ -136,9 +136,8 @@ def main():
                 )
 
                 # Convert to CARLA controls
-                print(actions_np)
+
                 carla_actions = decode_continuous_actions(actions_np)
-                print(carla_actions)
                 world.manager.apply_actions_to_controlled(carla_actions)
 
                 # Step CARLA

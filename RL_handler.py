@@ -4,14 +4,14 @@ import numpy as np
 from typing import Optional, Callable, Any, Sequence, List, Dict
 import torch
 
-STEER_BINS = np.linspace(-np.pi, np.pi, 13)   # 13 values
+STEER_BINS = np.linspace(-np.pi, np.pi, 91)   # 13 values
 ACCEL_BINS = np.array([-4.0, -2.6, -1.3, 0.0, 1.3, 2.6, 4.0])  # 7 values
 
 # ---- CMPE obs layout: 10 scalar features + seg + depth ----
 CMPE_BASE_DIM = 10          # scalar ego features
 SEG_DEPTH_H = 128
 SEG_DEPTH_W = 128
-SEG_DEPTH_FEAT_DIM = 2 * SEG_DEPTH_H * SEG_DEPTH_W  # 2 channels (seg, depth)
+SEG_DEPTH_FEAT_DIM = 3 * SEG_DEPTH_H * SEG_DEPTH_W  # 2 channels (seg, depth)
 #SEG_DEPTH_FEAT_DIM = 0
 
 CMPE_OBS_DIM = CMPE_BASE_DIM + SEG_DEPTH_FEAT_DIM   # 10 + 2*128*128 = 32778 
@@ -148,7 +148,6 @@ class RLHandler:
         # 1) Get current obs from all controlled agents (GPUDrive-style)
         #obs_t = self._get_gpudrive_obs_from_manager()  # (num_agents, obs_dim) # This is only used when GPUDrive is needed
         obs_t = self._get_cmpe_obs_from_manager()
-
         rewards = None
         dones = None
 
@@ -189,9 +188,6 @@ class RLHandler:
         # Cache discrete actions for the NEXT transition storage
         if self.policy is not None:
             self.last_disc_actions = disc_np.copy()
-
-
-
 
         # Ensure actions are (N, action_dim)
         actions_t = np.asarray(actions_t, dtype=np.float32)
@@ -401,53 +397,92 @@ class RLHandler:
     
     def decode_discrete_action(self, discrete_action: np.ndarray) -> np.ndarray:
         """
-        Converts discrete GPUDrive-style action(s) into CARLA continuous control:
+        Converts discrete action(s) into CARLA continuous control:
             throttle, steer, brake
+
+        We support two layouts, depending on policy.num_actions:
+
+        1) 2D (legacy): steer x accel grid
+           num_actions = len(STEER_BINS) * len(ACCEL_BINS)
+           -> action index encodes both steer + accel.
+
+        2) 1D (steering-only): num_actions = len(STEER_BINS)
+           -> action index is directly a steering-bin index.
+              Accel is scripted/fixed here.
 
         discrete_action:
             - scalar: single action
             - or array-like shape (N,) for N agents
 
         Returns:
-            actions: np.ndarray, shape (N, 3)
+            actions: np.ndarray, shape (N, 3) = [throttle, steer, brake]
         """
         # Convert to 1D int array
         act = np.asarray(discrete_action, dtype=np.int64)
 
-        # Case 1: scalar → reshape to (1,)
         if act.ndim == 0:
-            act = act.reshape(1)
+            act = act.reshape(1)  # (1,)
 
-        # Now act.shape == (N,)
         num_steer = STEER_BINS.shape[0]   # 13
         num_accel = ACCEL_BINS.shape[0]   # 7
-        num_actions = num_steer * num_accel
 
-        # Optional safety check
-        if np.any(act < 0) or np.any(act >= num_actions):
+        # Default to "unknown" if policy missing or doesn't expose num_actions
+        policy_num_actions = getattr(self.policy, "num_actions", None)
+
+        # ------------------------------
+        # Case 1: 2D (steer x accel) grid
+        # ------------------------------
+        if policy_num_actions == num_steer * num_accel:
+            # Safety check on range
+            if np.any(act < 0) or np.any(act >= policy_num_actions):
+                raise ValueError(
+                    f"Discrete action out of range [0, {policy_num_actions}): {act}"
+                )
+
+            # You can keep your original encoding scheme here.
+            # I'm using accel-major: first cycle accel, then steer.
+            steer_idx = act % num_steer        # (N,)
+            accel_idx = act // num_steer       # (N,)
+
+            steer = STEER_BINS[steer_idx]      # (N,)
+            accel = ACCEL_BINS[accel_idx]      # (N,)
+
+            # Convert accel → throttle/brake
+            throttle = np.clip(accel, 0, None) / 4.0   # 0..1
+            brake    = np.clip(-accel, 0, None) / 4.0  # 0..1
+
+        # ------------------------------
+        # Case 2: 1D steering-only DQN
+        # ------------------------------
+        elif policy_num_actions == num_steer:
+            # Here each discrete action is *just* a steering bin index
+            # Clip to be safe
+            steer_idx = np.clip(act, 0, num_steer - 1)   # (N,)
+            steer = STEER_BINS[steer_idx]               # (N,)
+
+            # SIMPLE SCRIPTED SPEED CONTROL:
+            # constant moderate throttle, no brake
+            throttle = np.full_like(steer, 0.4, dtype=np.float32)
+            brake    = np.zeros_like(steer, dtype=np.float32)
+
+        # ------------------------------
+        # Fallback / error
+        # ------------------------------
+        else:
+            # If you hit this, your policy.num_actions is inconsistent
             raise ValueError(
-                f"Discrete action out of range [0, {num_actions}): {act}"
+                f"Unexpected policy.num_actions={policy_num_actions}. "
+                f"Expected {num_steer} (steer-only) or {num_steer * num_accel} (steer x accel)."
             )
 
-        # Vectorized indices
-        steer_idx = act % num_steer        # shape (N,)
-        accel_idx = act // num_steer       # shape (N,)
-
-        # Map to actual values (broadcasted)
-        steer = STEER_BINS[steer_idx]      # (N,)
-        accel = ACCEL_BINS[accel_idx]      # (N,)
-
-        # Convert accel → throttle/brake
-        throttle = np.clip(accel, 0, None) / 4.0   # 0..1, shape (N,)
-        brake    = np.clip(-accel, 0, None) / 4.0  # 0..1, shape (N,)
-
         # Normalize steering from [-pi, pi] to [-1, 1]
-        steer_norm = steer / np.pi                 # (N,)
+        steer_norm = steer / np.pi
 
-        # Stack into (N, 3)
-        actions = np.stack([throttle, steer_norm, brake], axis=-1).astype(np.float32)
+        # Stack into (N, 3) = [throttle, steer_norm, brake]
+        actions = np.stack([throttle.astype(np.float32),
+                            steer_norm.astype(np.float32),
+                            brake.astype(np.float32)], axis=-1)
         return actions
-
     
 
     def reset(self, clear_buffer: bool = False) -> None:

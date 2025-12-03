@@ -30,8 +30,8 @@ import pygame
 
 # --------- DQN training hyperparams ----------
 LEARNING_START = 2_000      # replay size before we start learning
-TRAIN_EVERY    = 32          # gradient step every N env steps
-GRAD_UPDATES_PER_CALL = 16   # how many batches per train_step call
+TRAIN_EVERY    = 64          # gradient step every N env steps
+GRAD_UPDATES_PER_CALL = 64   # how many batches per train_step call
 
 
 
@@ -94,8 +94,9 @@ if __name__ == "__main__":
 
     elif config.get_use_policy() == "local-dqn":
         num_steer = len(STEER_BINS)
-        num_accel = len(ACCEL_BINS)
-        num_actions = num_steer * num_accel
+
+        # 1D action: steering only. Each action index corresponds to one steering bin.
+        num_actions = num_steer
 
         policy = DQNPolicy(
             obs_dim=CMPE_OBS_DIM,
@@ -112,7 +113,6 @@ if __name__ == "__main__":
             img_height=128,
             img_width=128,
         )
-        # <- here we want dict-style obs with vision
         use_dict_policy = True
     else:
         policy = None
@@ -141,8 +141,8 @@ if __name__ == "__main__":
     # 5) Episode settings
     # -----------------------------
     # If your config has these getters, use them; otherwise defaults.
-    max_episodes = getattr(config, "max_episodes", 200)
-    max_steps_per_episode = getattr(config, "max_steps_per_episode", 1000)
+    max_episodes = getattr(config, "max_episodes", 2000)
+    max_steps_per_episode = getattr(config, "max_steps_per_episode", 20000)
 
     print(
         f"[train_CMPE] Starting training: "
@@ -176,11 +176,7 @@ if __name__ == "__main__":
                 # done: (N,) or None on the very first ever step
 
                 # Debug print (you can comment this out if too noisy)
-                print(
-                    f"[train_CMPE] ep {ep} | step {step_in_ep} "
-                    f"| obs shape: {obs.shape}, act shape: {act.shape}"
-                )
-
+            
                 # Optional: visualize planned routes
                 if config.get_if_route_planning():
                     world.manager.visualize_path()

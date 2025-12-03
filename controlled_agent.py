@@ -18,6 +18,7 @@ except IndexError:
 
 from agents.navigation.global_route_planner import GlobalRoutePlanner
 
+# FOR CMPE - > FIX random
 
 class Controlled_Agents(Agent):
     """
@@ -32,7 +33,7 @@ class Controlled_Agents(Agent):
     """
 
     def __init__(self, world: carla.World, index: int, config: Dict[str, Any]):
-        super().__init__(world, index, config, role_prefix="controlled_agent")
+        super().__init__(world, index, config, role_prefix="controlled_agent", seed = 13)
         # self.starting_point: carla.Location = (
         #     self.vehicle.get_transform().location if self.vehicle is not None else None
         # )
@@ -54,7 +55,7 @@ class Controlled_Agents(Agent):
         if self.config.get_if_route_planning() and self.vehicle is not None:
 
             # Build planner once per agent
-            self._route_planner = GlobalRoutePlanner(self.world.get_map(), 5.0)
+            self._route_planner = GlobalRoutePlanner(self.world.get_map(), 3.0)
 
             # Compute the route between start and end
             if self.starting_point is not None and self.destination is not None:
