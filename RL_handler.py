@@ -11,9 +11,11 @@ ACCEL_BINS = np.array([-4.0, -2.6, -1.3, 0.0, 1.3, 2.6, 4.0])  # 7 values
 CMPE_BASE_DIM = 10          # scalar ego features
 SEG_DEPTH_H = 128
 SEG_DEPTH_W = 128
-SEG_DEPTH_FEAT_DIM = 2 * SEG_DEPTH_H * SEG_DEPTH_W  # 2 channels (seg, depth)
+#SEG_DEPTH_FEAT_DIM = 2 * SEG_DEPTH_H * SEG_DEPTH_W  # 2 channels (seg, depth)
+SEG_DEPTH_FEAT_DIM = 0
 
-CMPE_OBS_DIM = CMPE_BASE_DIM + SEG_DEPTH_FEAT_DIM   # 10 + 2*128*128 = 32778
+CMPE_OBS_DIM = CMPE_BASE_DIM + SEG_DEPTH_FEAT_DIM   # 10 + 2*128*128 = 32778 
+
 
 
 class SimpleReplayBuffer:
@@ -254,11 +256,11 @@ class RLHandler:
                 continue
 
             obs = self.manager.get_agent_cmpe_style_obs(agent)
-            print(obs[10:20].min(), obs[10:20].max())          # seg slice sample
-            print(obs[10 + SEG_DEPTH_H * SEG_DEPTH_W:
-                    10 + 2 * SEG_DEPTH_H * SEG_DEPTH_W].min())
-            print(obs[10 + SEG_DEPTH_H * SEG_DEPTH_W:
-                    10 + 2 * SEG_DEPTH_H * SEG_DEPTH_W].max())
+            # print(obs[10:20].min(), obs[10:20].max())          # seg slice sample
+            # print(obs[10 + SEG_DEPTH_H * SEG_DEPTH_W:
+            #         10 + 2 * SEG_DEPTH_H * SEG_DEPTH_W].min())
+            # print(obs[10 + SEG_DEPTH_H * SEG_DEPTH_W:
+            #         10 + 2 * SEG_DEPTH_H * SEG_DEPTH_W].max())
 
             # Handle torch or numpy
             if isinstance(obs, torch.Tensor):

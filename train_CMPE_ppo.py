@@ -82,7 +82,7 @@ def main():
         device=None,
     )
 
-    rollout_horizon = 256
+    rollout_horizon = 512
     num_updates = 1000
     ppo_epochs = 4
     ppo_batch_size = 64
@@ -217,7 +217,46 @@ def main():
                         depth_surface = pygame.transform.scale(depth_surface, (320, 180))
                         screen.blit(depth_surface, (480, 180))
 
-                                # ---- draw text (status, horizontally) ----
+                # ---- draw goal / ego debug text ----
+                # We'll stack all text vertically using text_y.
+                text_y = 360
+                text_x = 10
+
+                debug = world.manager.get_first_agent_goal_debug()
+                if debug is not None and len(world.manager.controlled_agents) > 0:
+                    ego_loc, goal_loc, (dx, dy) = debug
+                    ego_agent = world.manager.controlled_agents[0]
+
+                    # rel in ego frame (forward/left), using your existing helper
+                    try:
+                        ego_raw = world.manager.get_agent_ego_raw_for_logging(
+                            ego_agent, goal_loc
+                        )
+                        rel_x_ego = float(ego_raw[3])  # forward (+)
+                        rel_y_ego = float(ego_raw[4])  # left (+)
+                    except Exception:
+                        rel_x_ego, rel_y_ego = 0.0, 0.0
+
+                    # Line 1: world-frame coordinates
+                    goal_text1 = (
+                        f"EgoW=({ego_loc.x:.1f},{ego_loc.y:.1f})  "
+                        f"GoalW=({goal_loc.x:.1f},{goal_loc.y:.1f})  "
+                        f"RelW=({dx:.1f},{dy:.1f})"
+                    )
+                    goal_surf1 = font.render(goal_text1, True, (0, 255, 255))
+                    screen.blit(goal_surf1, (text_x, text_y))
+                    text_y += goal_surf1.get_height() + 2
+
+                    # Line 2: ego-frame coordinates (this tells you ahead/behind)
+                    goal_text2 = (
+                        f"RelEgo: x={rel_x_ego:.1f}m (forward+), "
+                        f"y={rel_y_ego:.1f}m (left+)"
+                    )
+                    goal_surf2 = font.render(goal_text2, True, (0, 200, 200))
+                    screen.blit(goal_surf2, (text_x, text_y))
+                    text_y += goal_surf2.get_height() + 6  # small gap before status
+
+                # ---- draw text (status, horizontally) ----
                 status_items = [
                     f"Upd {update_idx + 1}",
                     f"t {t}",
@@ -226,17 +265,16 @@ def main():
                 if rewards is not None and rewards.shape[0] > 0:
                     status_items.append(f"R0 {float(rewards[0]):.3f}")
 
-                text_y = 380
-                text_x = 10
+                status_x = 10
                 for item in status_items:
                     surf = font.render(item, True, (255, 255, 255))
-                    screen.blit(surf, (text_x, text_y))
-                    text_x += surf.get_width() + 20  # move right
+                    screen.blit(surf, (status_x, text_y))
+                    status_x += surf.get_width() + 20  # move right
+                text_y += 22  # move down for next row
 
                 # ---- ego obs (still useful, but compact) ----
                 ego_obs = obs_np[0] if obs_np.shape[0] > 0 else None
                 if ego_obs is not None:
-                    text_y += 22
                     text_x = 10
                     label_surf = font.render("Ego[0..9]:", True, (200, 200, 200))
                     screen.blit(label_surf, (text_x, text_y))
@@ -247,13 +285,13 @@ def main():
                         surf = font.render(item, True, (200, 200, 200))
                         screen.blit(surf, (text_x, text_y))
                         text_x += surf.get_width() + 8
+                    text_y += 22  # move down after ego obs
 
                 # ---- reward / penalty events (also horizontal) ----
                 if len(world.manager.controlled_agents) > 0:
                     ego_agent = world.manager.controlled_agents[0]
                     events = getattr(ego_agent, "last_reward_events", [])
                     if events:
-                        text_y += 24
                         text_x = 10
                         header_surface = font.render("Events:", True, (200, 200, 200))
                         screen.blit(header_surface, (text_x, text_y))
@@ -271,6 +309,8 @@ def main():
                             ev_surface = font.render(ev_str, True, color)
                             screen.blit(ev_surface, (text_x, text_y))
                             text_x += ev_surface.get_width() + 15
+                        # text_y += 22  # (optional) move down if you add more lines later
+
 
 
                 pygame.display.flip()

@@ -15,12 +15,12 @@ import queue
 MAX_SPEED = 100.0
 MAX_VEH_LEN = 30.0
 MAX_VEH_WIDTH = 15.0
-MIN_REL_GOAL_COORD = -200.0
-MAX_REL_GOAL_COORD = 200.0
+MIN_REL_GOAL_COORD = -100.0
+MAX_REL_GOAL_COORD = 100.0
 SEG_DEPTH_H = 128
 SEG_DEPTH_W = 128
-CMPE_OBS_DIM = 10 + 2 * SEG_DEPTH_H * SEG_DEPTH_W
-
+#CMPE_OBS_DIM = 10 + 2 * SEG_DEPTH_H * SEG_DEPTH_W
+CMPE_OBS_DIM = 10 
 
 
 def normalize_min_max_np(x: float, min_val: float, max_val: float) -> float:
@@ -328,47 +328,47 @@ class Manager:
             dtype=np.float32,
         )
 
-        # ------------------------------------------------------------------
-        # 7) Append seg + depth images (128x128 each)
-        # ------------------------------------------------------------------
-        seg = agent.get_seg_latest() if hasattr(agent, "get_seg_latest") else None
-        depth = agent.get_depth_latest() if hasattr(agent, "get_depth_latest") else None
+        # # ------------------------------------------------------------------
+        # # 7) Append seg + depth images (128x128 each)
+        # # ------------------------------------------------------------------
+        # seg = agent.get_seg_latest() if hasattr(agent, "get_seg_latest") else None
+        # depth = agent.get_depth_latest() if hasattr(agent, "get_depth_latest") else None
 
-        if seg is None or depth is None:
-            seg_flat = np.zeros(SEG_DEPTH_H * SEG_DEPTH_W, dtype=np.float32)
-            depth_flat = np.zeros(SEG_DEPTH_H * SEG_DEPTH_W, dtype=np.float32)
-        else:
-            # seg: int labels, CARLA doc says 13 classes → IDs in [0, 12]
-            seg = np.asarray(seg, dtype=np.int32)
-            depth = np.asarray(depth, dtype=np.float32)
+        # if seg is None or depth is None:
+        #     seg_flat = np.zeros(SEG_DEPTH_H * SEG_DEPTH_W, dtype=np.float32)
+        #     depth_flat = np.zeros(SEG_DEPTH_H * SEG_DEPTH_W, dtype=np.float32)
+        # else:
+        #     # seg: int labels, CARLA doc says 13 classes → IDs in [0, 12]
+        #     seg = np.asarray(seg, dtype=np.int32)
+        #     depth = np.asarray(depth, dtype=np.float32)
 
-            assert seg.shape == (SEG_DEPTH_H, SEG_DEPTH_W), \
-                f"seg shape {seg.shape} != {(SEG_DEPTH_H, SEG_DEPTH_W)}"
-            assert depth.shape == (SEG_DEPTH_H, SEG_DEPTH_W), \
-                f"depth shape {depth.shape} != {(SEG_DEPTH_H, SEG_DEPTH_W)}"
+        #     assert seg.shape == (SEG_DEPTH_H, SEG_DEPTH_W), \
+        #         f"seg shape {seg.shape} != {(SEG_DEPTH_H, SEG_DEPTH_W)}"
+        #     assert depth.shape == (SEG_DEPTH_H, SEG_DEPTH_W), \
+        #         f"depth shape {depth.shape} != {(SEG_DEPTH_H, SEG_DEPTH_W)}"
 
-            # --- Segmentation normalization ---
-            # 13 classes → labels in [0, 12], map to [0, 1]
-            max_label = 12.0
-            seg_norm = np.clip(seg.astype(np.float32), 0.0, max_label) / max_label
+        #     # --- Segmentation normalization ---
+        #     # 13 classes → labels in [0, 12], map to [0, 1]
+        #     max_label = 12.0
+        #     seg_norm = np.clip(seg.astype(np.float32), 0.0, max_label) / max_label
 
-            # --- Depth normalization ---
-            depth_cap = 100.0
-            depth_clipped = np.clip(depth, 0.0, depth_cap)
-            depth_norm = depth_clipped / depth_cap  # [0, 1]
+        #     # --- Depth normalization ---
+        #     depth_cap = 100.0
+        #     depth_clipped = np.clip(depth, 0.0, depth_cap)
+        #     depth_norm = depth_clipped / depth_cap  # [0, 1]
 
-            seg_flat = seg_norm.reshape(-1).astype(np.float32)
-            depth_flat = depth_norm.reshape(-1).astype(np.float32)
+        #     seg_flat = seg_norm.reshape(-1).astype(np.float32)
+        #     depth_flat = depth_norm.reshape(-1).astype(np.float32)
 
-        full_obs = np.concatenate([core_obs, seg_flat, depth_flat], axis=0)
+        # full_obs = np.concatenate([core_obs, seg_flat, depth_flat], axis=0)
 
-        if full_obs.shape[0] != CMPE_OBS_DIM:
-            raise ValueError(
-                f"CMPE obs dim mismatch: got {full_obs.shape[0]}, expected {CMPE_OBS_DIM}"
-            )
+        # if full_obs.shape[0] != CMPE_OBS_DIM:
+        #     raise ValueError(
+        #         f"CMPE obs dim mismatch: got {full_obs.shape[0]}, expected {CMPE_OBS_DIM}"
+        #     )
 
-        return full_obs
-
+        #return full_obs
+        return core_obs
 
 
     
@@ -611,28 +611,29 @@ class Manager:
           - Lane invasion              → stage-based penalty (can be fatal)
           - Steering magnitude         → penalty to discourage circling
           - No-progress for long       → penalty + terminate (anti-orbit)
-          - Small per-step penalty     → encourage faster completion
-
-        Returns
-        -------
-        rewards : np.ndarray, shape (num_controlled,)
-        dones   : np.ndarray, shape (num_controlled,)
+          - Speed / direction shaping:
+                * reward motion along line to next waypoint
+                * penalize sideways (lateral) motion
         """
         num_ctrl = len(self.controlled_agents)
         rewards = np.zeros(num_ctrl, dtype=np.float32)
         dones = np.zeros(num_ctrl, dtype=bool)
 
         # ---- global tuning knobs (feel free to tweak) ----
-        W_FORWARD = 1.0          # reward for making progress
-        W_BACKWARD = 2.0         # penalty for going away from goal
+        W_FORWARD = 1.0             # reward for making progress
+        W_BACKWARD = 2.0            # penalty for going away from goal
         DIST_PENALTY_SCALE = 0.01   # per-meter distance penalty (clipped)
         MAX_DIST_FOR_PENALTY = 100.0
 
-        MAX_IDLE_STEPS = 20      # start counting "idle too long"
-        IDLE_PENALTY = 1.0       # per-step penalty once idle kicks in
-        NO_PROGRESS_DONE_STEPS = 80  # hard terminate if no progress this long
+        MAX_IDLE_STEPS = 20         # start counting "idle too long"
+        IDLE_PENALTY = 1.0          # per-step penalty once idle kicks in
+        NO_PROGRESS_DONE_STEPS = 80 # hard terminate if no progress this long
 
-        STEER_MAG_PENALTY = 0.05   # penalty * |steer|
+        STEER_MAG_PENALTY = 0.05    # penalty * |steer|
+
+        # 🔹 NEW: “follow the line to waypoint” shaping
+        ALONG_REWARD_SCALE = 0.1    # reward per m/s along line to waypoint
+        LAT_PENALTY_SCALE  = 0.2    # penalty per m/s lateral to that line
 
         for i, agent in enumerate(self.controlled_agents):
             # Agent missing or no vehicle → treat as done with zero reward
@@ -654,9 +655,6 @@ class Manager:
                 rewards[i] = 0.0
                 continue
 
-            # Some vehicles may already be destroyed by CARLA.
-            # Any call on them (get_transform, get_velocity, etc.)
-            # will raise RuntimeError. We catch that and mark as done.
             try:
                 # Check if this vehicle is still marked active in global structures
                 idx_all = self.vehicle_to_index.get(vehicle.id, None)
@@ -668,7 +666,8 @@ class Manager:
                 # ------------------------------------------------------------------
                 # Distance-based progress toward current goal (subgoal or final)
                 # ------------------------------------------------------------------
-                loc = vehicle.get_transform().location
+                tf = vehicle.get_transform()
+                loc = tf.location
 
                 # Determine current goal:
                 #   - intermediate waypoint if available
@@ -690,6 +689,27 @@ class Manager:
                 dx = float(goal_loc.x) - float(loc.x)
                 dy = float(goal_loc.y) - float(loc.y)
                 dist = float(np.sqrt(dx * dx + dy * dy))
+
+                # 🔹 NEW: velocity decomposition w.r.t. line to waypoint
+                vel = vehicle.get_velocity()
+                vx = float(vel.x)
+                vy = float(vel.y)
+                speed = math.sqrt(vx * vx + vy * vy)  # planar speed
+
+                if dist > 1e-3:
+                    # unit vector from ego → waypoint
+                    ux = dx / dist
+                    uy = dy / dist
+
+                    # component of velocity along the line (dot product)
+                    v_along = vx * ux + vy * uy   # m/s toward waypoint (can be negative)
+
+                    # lateral speed = |v × u| in 2D
+                    # cross(v, u)_z = vx*uy - vy*ux, magnitude is lateral component
+                    lat_speed = abs(vx * uy - vy * ux)
+                else:
+                    v_along = 0.0
+                    lat_speed = 0.0
 
                 # previous distance stored on agent (per-episode), for THIS goal
                 dist_prev = getattr(agent, "prev_dist_to_goal", None)
@@ -726,6 +746,24 @@ class Manager:
                     r -= dist_pen
                     events.append(f"-{dist_pen:.2f} distance penalty")
 
+                # ---------------- NEW: line-following shaping ----------------
+                # Reward moving along the line to the waypoint,
+                # penalize moving sideways relative to that line.
+                if v_along > 0.0:
+                    along_reward = ALONG_REWARD_SCALE * v_along
+                    r += along_reward
+                    events.append(f"+{along_reward:.2f} along-waypoint speed")
+                elif v_along < 0.0:
+                    # moving directly away from waypoint → penalize
+                    back_pen = ALONG_REWARD_SCALE * (-v_along)
+                    r -= back_pen
+                    events.append(f"-{back_pen:.2f} moving away from waypoint")
+
+                if lat_speed > 0.0:
+                    lat_pen = LAT_PENALTY_SCALE * lat_speed
+                    r -= lat_pen
+                    events.append(f"-{lat_pen:.2f} lateral deviation")
+
                 # ---------------- Idle / no-progress penalties ----------------
                 if idle_steps > MAX_IDLE_STEPS and dist > 10.0:
                     # per-step penalty when basically not reducing distance
@@ -734,11 +772,11 @@ class Manager:
 
                 # Hard terminate if we've made no progress for a long time
                 done = False
-                if idle_steps > NO_PROGRESS_DONE_STEPS and dist > 10.0:
-                    done = True
-                    extra_pen = 5.0
-                    r -= extra_pen
-                    events.append(f"-{extra_pen:.2f} terminate: no progress")
+                # if idle_steps > NO_PROGRESS_DONE_STEPS and dist > 10.0:
+                #     done = True
+                #     extra_pen = 5.0
+                #     r -= extra_pen
+                #     events.append(f"-{extra_pen:.2f} terminate: no progress")
 
                 # ---------------- Steering penalty ----------------
                 # Discourages tight circles: large |steer| over time is costly.
@@ -846,11 +884,40 @@ class Manager:
 
 
 
+
     # Visualize Path for each controlled
     def visualize_path(self):
         for agent in self.controlled_agents:
             #print('drawing drawing')
             agent.draw_current_route_debug()
+
+    # --------------------------------------------------
+    # DEBUG: ego + goal locations
+    # --------------------------------------------------
+    def get_first_agent_goal_debug(self):
+        """
+        Return (ego_loc, goal_loc, rel_xy) for the first controlled agent.
+
+        ego_loc, goal_loc are carla.Location
+        rel_xy is (dx, dy) in world coordinates: goal - ego
+        """
+        if not self.controlled_agents:
+            return None
+
+        agent = self.controlled_agents[0]
+        vehicle = getattr(agent, "vehicle", None)
+        if vehicle is None:
+            return None
+
+        ego_tf = vehicle.get_transform()
+        ego_loc = ego_tf.location
+
+        goal_loc = self.get_current_goal_location(agent)
+
+        dx = float(goal_loc.x) - float(ego_loc.x)
+        dy = float(goal_loc.y) - float(ego_loc.y)
+
+        return ego_loc, goal_loc, (dx, dy)
 
     # --------------------------------------------------
     # Cleanup & removal

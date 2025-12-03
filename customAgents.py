@@ -59,34 +59,57 @@ class Agent:
 
         while attempts < max_attempts and vehicle is None:
             bp = random.choice(vehicle_blueprints)
-            if self.role_prefix == 'controlled_agent': # force controlled agents to be model 3
+            if self.role_prefix == "controlled_agent":  # force controlled agents to be model 3
                 bp = blueprint_library.find("vehicle.tesla.model3")
+
             # Random color if available
             if bp.has_attribute("color"):
                 color = random.choice(bp.get_attribute("color").recommended_values)
                 bp.set_attribute("color", color)
 
-            # Role name for debugging & filtering
-            
-            #spawn_point = self.find_closest_spawn(spawn_points) #FOR EASE of OBSERVATION I USE THIS SPAWN FINDING 
+            # --- pick a base spawn point ---
+            # spawn_point = self.find_closest_spawn(spawn_points)  # optional custom
             spawn_point = spawn_points[attempts % len(spawn_points)]
+
+            # --- IMPORTANT: for controlled agents, align spawn to lane direction ---
+            if self.role_prefix == "controlled_agent":
+                carla_map = self.world.get_map()
+                wp = carla_map.get_waypoint(
+                    spawn_point.location,
+                    project_to_road=True,
+                    lane_type=carla.LaneType.Driving,
+                )
+                # Align to lane center + lane yaw so route "forward" matches vehicle "forward".
+                spawn_point = carla.Transform(
+                    wp.transform.location,
+                    wp.transform.rotation,
+                )
+
+            # Starting point is the (possibly adjusted) spawn location
             self.starting_point = spawn_point.location
+
             if self.role_prefix == "controlled_agent":
                 start = self.starting_point
                 self.destination = self._pick_nearby_destination(
                     world=self.world,
                     start_location=self.starting_point,
-                    min_distance=50,   # or whatever you want
+                    min_distance=50.0,   # tweak as you like
                     step=2.0,
                 )
                 dest = self.destination
                 print(dest)
-                bp.set_attribute("role_name", f"{self.role_prefix}_{self.index}|{start.x:.2f},{start.y:.2f},{start.z:.2f}|{dest.x:.2f},{dest.y:.2f},{dest.z:.2f}")
+                bp.set_attribute(
+                    "role_name",
+                    f"{self.role_prefix}_{self.index}"
+                    f"|{start.x:.2f},{start.y:.2f},{start.z:.2f}"
+                    f"|{dest.x:.2f},{dest.y:.2f},{dest.z:.2f}"
+                )
             else:
                 bp.set_attribute("role_name", f"{self.role_prefix}_{self.index}")
-            vehicle = self.world.try_spawn_actor(bp, spawn_point)
 
+            vehicle = self.world.try_spawn_actor(bp, spawn_point)
             attempts += 1
+
 
         if vehicle is None:
             raise RuntimeError(

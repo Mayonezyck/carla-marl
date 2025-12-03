@@ -7,7 +7,7 @@ other:
 
 experiment:
   policy: "local-ppo"
-  reward_stage: 2
+  reward_stage: 1
   road_point_extractor:
     step_size : 0.5
     search_radius: 50
