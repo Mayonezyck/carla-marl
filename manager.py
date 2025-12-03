@@ -175,13 +175,17 @@ class Manager:
           - If the agent has a route (current_waypoint_plan) and a valid
             current_wp_index, use that waypoint as the current intermediate goal.
           - Otherwise, fall back to agent.destination.
+
+        Additionally:
+          - If the current waypoint is *behind* the vehicle in the ego frame,
+            we advance current_wp_index until we find one that is in front
+            (rel_x >= 0), or fall back to the final destination.
         """
         vehicle = getattr(agent, "vehicle", None)
         if vehicle is None:
             # Fallback: arbitrary location
             return self.world.get_map().get_spawn_points()[0].location
 
-        # Default: use final destination if present
         tf = vehicle.get_transform()
         loc = tf.location
         default_goal = getattr(agent, "destination", loc)
@@ -196,8 +200,45 @@ class Manager:
             # Index out of range → use final dest
             return default_goal
 
-        wp, _ = route[wp_idx]
-        return wp.transform.location
+        # --- new logic: skip waypoints that are behind ego in ego frame ---
+        yaw_rad = math.radians(tf.rotation.yaw)
+        cos_e = math.cos(yaw_rad)
+        sin_e = math.sin(yaw_rad)
+
+        # how far "in front" we require (meters); 0.0 = strictly not behind
+        FORWARD_THRESH = 0.0
+
+        k = wp_idx
+        last_valid_idx = len(route) - 1
+        chosen_loc = None
+
+        while k <= last_valid_idx:
+            wp, _ = route[k]
+            goal_loc = wp.transform.location
+
+            dx = float(goal_loc.x) - float(loc.x)
+            dy = float(goal_loc.y) - float(loc.y)
+
+            # ego frame: x forward, y left
+            rel_x = cos_e * dx + sin_e * dy
+            # rel_y = -sin_e * dx + cos_e * dy  # not needed here
+
+            if rel_x >= FORWARD_THRESH:
+                # found a waypoint that is at or ahead of the vehicle
+                chosen_loc = goal_loc
+                break
+            else:
+                # this waypoint is behind → skip it
+                k += 1
+
+        if chosen_loc is None:
+            # All route waypoints are behind ego: just use final destination
+            return default_goal
+
+        # Update current_wp_index so reward logic uses the same waypoint
+        agent.current_wp_index = k
+        return chosen_loc
+
 
 
     def get_agent_cmpe_style_obs(self, agent) -> np.ndarray:
@@ -603,37 +644,42 @@ class Manager:
         Compute rewards and done flags for each controlled agent.
 
         Heuristic:
-          - Progress toward goal       → positive reward
+          - Progress toward goal       → main positive signal
           - Moving away from goal      → stronger negative
-          - Being far from goal        → small distance penalty
+          - Reward motion along line to next waypoint (v_along)
+          - Penalize lateral motion relative to that line
           - Reaching goal              → big positive + done
           - Collision (fatal flag)     → big negative + done (agent removed)
           - Lane invasion              → stage-based penalty (can be fatal)
           - Steering magnitude         → penalty to discourage circling
-          - No-progress for long       → penalty + terminate (anti-orbit)
-          - Speed / direction shaping:
-                * reward motion along line to next waypoint
-                * penalize sideways (lateral) motion
+          - Small per-step time penalty
         """
         num_ctrl = len(self.controlled_agents)
         rewards = np.zeros(num_ctrl, dtype=np.float32)
         dones = np.zeros(num_ctrl, dtype=bool)
 
-        # ---- global tuning knobs (feel free to tweak) ----
-        W_FORWARD = 1.0             # reward for making progress
-        W_BACKWARD = 2.0            # penalty for going away from goal
-        DIST_PENALTY_SCALE = 0.01   # per-meter distance penalty (clipped)
-        MAX_DIST_FOR_PENALTY = 100.0
+        # ---- global tuning knobs ----
+        W_FORWARD = 1.0             # reward per meter progress
+        W_BACKWARD = 2.0            # penalty factor when moving away
 
         MAX_IDLE_STEPS = 20         # start counting "idle too long"
         IDLE_PENALTY = 1.0          # per-step penalty once idle kicks in
-        NO_PROGRESS_DONE_STEPS = 80 # hard terminate if no progress this long
+        NO_PROGRESS_DONE_STEPS = 80 # (currently not used as terminate)
 
         STEER_MAG_PENALTY = 0.05    # penalty * |steer|
 
-        # 🔹 NEW: “follow the line to waypoint” shaping
-        ALONG_REWARD_SCALE = 0.1    # reward per m/s along line to waypoint
-        LAT_PENALTY_SCALE  = 0.2    # penalty per m/s lateral to that line
+        # Line-following shaping
+        ALONG_REWARD_SCALE = 0.05   # reward per m/s toward waypoint
+        LAT_PENALTY_SCALE  = 0.1    # penalty per m/s lateral to that line
+        V_ALONG_CAP        = 8.0    # cap on how much along-speed we reward
+
+        # Per-step time penalty
+        if self.reward_stage == 1:
+            STEP_TIME_PEN = 0.01
+        elif self.reward_stage == 2:
+            STEP_TIME_PEN = 0.015
+        else:
+            STEP_TIME_PEN = 0.02
 
         for i, agent in enumerate(self.controlled_agents):
             # Agent missing or no vehicle → treat as done with zero reward
@@ -690,7 +736,9 @@ class Manager:
                 dy = float(goal_loc.y) - float(loc.y)
                 dist = float(np.sqrt(dx * dx + dy * dy))
 
-                # 🔹 NEW: velocity decomposition w.r.t. line to waypoint
+                # ------------------------------------------------------------------
+                # Velocity decomposition w.r.t. line to waypoint
+                # ------------------------------------------------------------------
                 vel = vehicle.get_velocity()
                 vx = float(vel.x)
                 vy = float(vel.y)
@@ -705,7 +753,7 @@ class Manager:
                     v_along = vx * ux + vy * uy   # m/s toward waypoint (can be negative)
 
                     # lateral speed = |v × u| in 2D
-                    # cross(v, u)_z = vx*uy - vy*ux, magnitude is lateral component
+                    # cross(v, u)_z = vx*uy - vy*ux → magnitude is lateral component
                     lat_speed = abs(vx * uy - vy * ux)
                 else:
                     v_along = 0.0
@@ -731,33 +779,30 @@ class Manager:
                 r = 0.0
                 events = []
 
-                # ---------------- Progress shaping ----------------
+                # ---------------- Progress shaping (main term) ----------------
                 if progress > 0.0:
-                    r += W_FORWARD * progress
-                else:
-                    r += W_BACKWARD * progress  # progress is negative here
+                    r_prog = W_FORWARD * progress
+                    r += r_prog
+                    events.append(f"+{r_prog:.2f} progress")
+                elif progress < 0.0:
+                    # progress is negative; penalize moving away
+                    r_back = W_BACKWARD * (-progress)
+                    r -= r_back
+                    events.append(f"-{r_back:.2f} moving away")
 
-                # ---------------- Distance penalty ----------------
-                # Always slightly penalize being far from goal.
-                # This breaks "orbiting" attractors where progress ~ 0.
-                clipped_dist = min(dist, MAX_DIST_FOR_PENALTY)
-                if clipped_dist > 0.0:
-                    dist_pen = DIST_PENALTY_SCALE * clipped_dist
-                    r -= dist_pen
-                    events.append(f"-{dist_pen:.2f} distance penalty")
-
-                # ---------------- NEW: line-following shaping ----------------
+                # ---------------- Line-following shaping ----------------
                 # Reward moving along the line to the waypoint,
                 # penalize moving sideways relative to that line.
                 if v_along > 0.0:
-                    along_reward = ALONG_REWARD_SCALE * v_along
+                    v_eff = min(v_along, V_ALONG_CAP)
+                    along_reward = ALONG_REWARD_SCALE * v_eff
                     r += along_reward
                     events.append(f"+{along_reward:.2f} along-waypoint speed")
                 elif v_along < 0.0:
-                    # moving directly away from waypoint → penalize
-                    back_pen = ALONG_REWARD_SCALE * (-v_along)
+                    v_eff = min(-v_along, V_ALONG_CAP)
+                    back_pen = ALONG_REWARD_SCALE * v_eff
                     r -= back_pen
-                    events.append(f"-{back_pen:.2f} moving away from waypoint")
+                    events.append(f"-{back_pen:.2f} moving away (vel)")
 
                 if lat_speed > 0.0:
                     lat_pen = LAT_PENALTY_SCALE * lat_speed
@@ -770,7 +815,8 @@ class Manager:
                     r -= IDLE_PENALTY
                     events.append(f"-{IDLE_PENALTY:.2f} idle too long")
 
-                # Hard terminate if we've made no progress for a long time
+                # Hard terminate on no progress: currently disabled,
+                # but you can re-enable if you want.
                 done = False
                 # if idle_steps > NO_PROGRESS_DONE_STEPS and dist > 10.0:
                 #     done = True
@@ -859,13 +905,9 @@ class Manager:
                         agent.had_lane_invasion = False
                         self.remove_agent(agent)
 
-                # ------------- Per-step time penalty by stage -------------
-                if self.reward_stage == 1:
-                    r -= 0.01
-                elif self.reward_stage == 2:
-                    r -= 0.015
-                else:  # stage 3+
-                    r -= 0.02
+                # ------------- Per-step time penalty -------------
+                r -= STEP_TIME_PEN
+                events.append(f"-{STEP_TIME_PEN:.3f} time")
 
                 agent.last_reward_events = events
 
@@ -881,6 +923,7 @@ class Manager:
                 self.remove_agent(agent)
 
         return rewards, dones
+
 
 
 
