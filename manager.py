@@ -711,6 +711,7 @@ class Manager:
         num_ctrl = len(self.controlled_agents)
         rewards = np.zeros(num_ctrl, dtype=np.float32)
         dones = np.zeros(num_ctrl, dtype=bool)
+        amap = self.world.get_map()
 
         # ---- global tuning knobs ----
         # Weaker emphasis on "distance change" / speed:
@@ -719,6 +720,8 @@ class Manager:
         MAX_IDLE_STEPS = 20
         IDLE_PENALTY = 1.0
         NO_PROGRESS_DONE_STEPS = 80  # still unused
+
+        LANE_CENTER_PENALTY_SCALE = 0.4  # << tune this
 
         # Steering robustness: make steering clearly expensive
         STEER_MAG_PENALTY = 0.12  # was 0.05 → much stronger
@@ -783,6 +786,45 @@ class Manager:
                 # ------------------------------------------------------------------
                 tf = vehicle.get_transform()
                 loc = tf.location
+
+                # ------------------------------------------------------------------
+                # NEW: lane-center penalty (distance from lane center line)
+                # ------------------------------------------------------------------
+                wp_center = amap.get_waypoint(
+                    loc,
+                    project_to_road=True,
+                    lane_type=carla.LaneType.Driving,
+                )
+
+                lane_tf = wp_center.transform
+                lane_loc = lane_tf.location
+                lane_yaw_rad = math.radians(lane_tf.rotation.yaw)
+
+                # vector from lane center to ego
+                dx_c = float(loc.x) - float(lane_loc.x)
+                dy_c = float(loc.y) - float(lane_loc.y)
+
+                # lateral offset relative to lane direction
+                # lane frame: x along lane, y left
+                lat_offset = abs(
+                    -math.sin(lane_yaw_rad) * dx_c +
+                    math.cos(lane_yaw_rad) * dy_c
+                )
+
+                
+
+                lane_center_pen = LANE_CENTER_PENALTY_SCALE * lat_offset
+                r -= lane_center_pen
+                self._accum_reward("dist_pen", -lane_center_pen)
+                events.append(f"-{lane_center_pen:.2f} lane-center offset")
+
+                # ------------------------------------------------------------------
+                # Determine current goal:
+                #   - intermediate waypoint if available
+                #   - otherwise final destination
+                # ------------------------------------------------------------------
+                route = getattr(agent, "current_waypoint_plan", None)
+
 
                 # Use the SAME logic as observations to pick the current goal.
                 # This function will also advance current_wp_index if it skips
