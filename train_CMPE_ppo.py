@@ -10,7 +10,7 @@ from world import CarlaWorld
 from RL_handler import CMPE_OBS_DIM
 from ppo_policy import PPOPolicy
 import imageio
-
+import shutil
 
 def decode_continuous_actions(raw_actions: np.ndarray) -> np.ndarray:
     """
@@ -37,11 +37,21 @@ def main():
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_output_dir = Path(f"cmpe_ppo_run_{run_timestamp}")
     base_output_dir.mkdir(parents=True, exist_ok=True)
+
+
     videos_dir = base_output_dir / "videos"
     policies_dir = base_output_dir / "policies"
     videos_dir.mkdir(parents=True, exist_ok=True)
     policies_dir.mkdir(parents=True, exist_ok=True)
 
+
+    # 🔹 Save a copy of the config into this run folder
+    config_path = Path("config_cmpe.yaml")
+    if config_path.exists():
+        shutil.copy(config_path, base_output_dir / config_path.name)
+        print(f"[PPO] Saved config to {base_output_dir / config_path.name}")
+    else:
+        print("[PPO] WARNING: config_cmpe.yaml not found, not saved.")
 
     print("[PPO] Starting CARLA client and world...")
     client = carlaClient()

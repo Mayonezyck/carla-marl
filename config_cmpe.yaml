@@ -6,8 +6,8 @@ other:
   pedestrian_count: 0
 
 experiment:
-  policy: "local-dqn"
-  reward_stage: 1
+  policy: "local-ppo"
+  reward_stage: 2
   road_point_extractor:
     step_size : 0.5
     search_radius: 50

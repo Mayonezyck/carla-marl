@@ -604,10 +604,13 @@ class Manager:
 
         Heuristic:
           - Progress toward goal       → positive reward
+          - Moving away from goal      → stronger negative
+          - Being far from goal        → small distance penalty
           - Reaching goal              → big positive + done
           - Collision (fatal flag)     → big negative + done (agent removed)
-          - Lane invasion              → small negative (no auto-terminate)
-          - Moving while light is red  → medium negative
+          - Lane invasion              → stage-based penalty (can be fatal)
+          - Steering magnitude         → penalty to discourage circling
+          - No-progress for long       → penalty + terminate (anti-orbit)
           - Small per-step penalty     → encourage faster completion
 
         Returns
@@ -618,6 +621,18 @@ class Manager:
         num_ctrl = len(self.controlled_agents)
         rewards = np.zeros(num_ctrl, dtype=np.float32)
         dones = np.zeros(num_ctrl, dtype=bool)
+
+        # ---- global tuning knobs (feel free to tweak) ----
+        W_FORWARD = 1.0          # reward for making progress
+        W_BACKWARD = 2.0         # penalty for going away from goal
+        DIST_PENALTY_SCALE = 0.01   # per-meter distance penalty (clipped)
+        MAX_DIST_FOR_PENALTY = 100.0
+
+        MAX_IDLE_STEPS = 20      # start counting "idle too long"
+        IDLE_PENALTY = 1.0       # per-step penalty once idle kicks in
+        NO_PROGRESS_DONE_STEPS = 80  # hard terminate if no progress this long
+
+        STEER_MAG_PENALTY = 0.05   # penalty * |steer|
 
         for i, agent in enumerate(self.controlled_agents):
             # Agent missing or no vehicle → treat as done with zero reward
@@ -683,22 +698,61 @@ class Manager:
                 progress = dist_prev - dist  # > 0 if moving closer
                 agent.prev_dist_to_goal = dist
 
+                # ---- idle / stall tracking based on progress ----
+                idle_steps = getattr(agent, "idle_steps", 0)
+                PROGRESS_EPS = 0.1  # meters; treat smaller as "no real progress"
+
+                if abs(progress) < PROGRESS_EPS:
+                    idle_steps += 1
+                else:
+                    idle_steps = 0
+                agent.idle_steps = idle_steps
+
                 r = 0.0
                 events = []
 
-                # Asymmetric progress reward:
-                # - moving closer: small positive
-                # - moving away: larger negative
-                W_FORWARD = 1.0   # reward weight
-                W_BACKWARD = 2.0  # penalty weight (> W_FORWARD)
-
+                # ---------------- Progress shaping ----------------
                 if progress > 0.0:
                     r += W_FORWARD * progress
                 else:
                     r += W_BACKWARD * progress  # progress is negative here
 
+                # ---------------- Distance penalty ----------------
+                # Always slightly penalize being far from goal.
+                # This breaks "orbiting" attractors where progress ~ 0.
+                clipped_dist = min(dist, MAX_DIST_FOR_PENALTY)
+                if clipped_dist > 0.0:
+                    dist_pen = DIST_PENALTY_SCALE * clipped_dist
+                    r -= dist_pen
+                    events.append(f"-{dist_pen:.2f} distance penalty")
 
+                # ---------------- Idle / no-progress penalties ----------------
+                if idle_steps > MAX_IDLE_STEPS and dist > 10.0:
+                    # per-step penalty when basically not reducing distance
+                    r -= IDLE_PENALTY
+                    events.append(f"-{IDLE_PENALTY:.2f} idle too long")
+
+                # Hard terminate if we've made no progress for a long time
                 done = False
+                if idle_steps > NO_PROGRESS_DONE_STEPS and dist > 10.0:
+                    done = True
+                    extra_pen = 5.0
+                    r -= extra_pen
+                    events.append(f"-{extra_pen:.2f} terminate: no progress")
+
+                # ---------------- Steering penalty ----------------
+                # Discourages tight circles: large |steer| over time is costly.
+                prev_ctrl = getattr(agent, "last_control", None)
+                if prev_ctrl is not None:
+                    if isinstance(prev_ctrl, dict):
+                        steer_val = float(prev_ctrl.get("steer", 0.0))
+                    else:
+                        steer_val = float(getattr(prev_ctrl, "steer", 0.0))
+
+                    steer_pen = STEER_MAG_PENALTY * abs(steer_val)
+                    if steer_pen > 0.0:
+                        r -= steer_pen
+                        events.append(f"-{steer_pen:.2f} steer penalty")
 
                 # ------------------------------------------------------------------
                 # Goal reached logic:
@@ -709,19 +763,22 @@ class Manager:
                 INTERMEDIATE_REWARD = 10.0
                 FINAL_REWARD = 100.0
 
-                if dist < GOAL_RADIUS:
+                if dist < GOAL_RADIUS and not done:
                     if use_route and not is_final_goal:
                         # Reached an intermediate waypoint
                         r += INTERMEDIATE_REWARD
+                        events.append(f"+{INTERMEDIATE_REWARD:.2f} intermediate goal")
                         # Advance to the next waypoint in the route
                         agent.current_wp_index = wp_idx + 1
                         # Reset distance baseline for the new goal
                         agent.prev_dist_to_goal = None
+                        # Also reset idle tracking, so new segment starts fresh
+                        agent.idle_steps = 0
                     else:
                         # Reached the final goal
                         r += FINAL_REWARD
                         done = True
-                        events.append("+100.00 goal reached")
+                        events.append(f"+{FINAL_REWARD:.2f} final goal reached")
                         # Mark this agent as finished so we don't keep rewarding
                         setattr(agent, "reached_final_goal", True)
                         # Optional: reset distance baseline
@@ -735,14 +792,13 @@ class Manager:
                     r -= 50.0
                     done = True
                     events.append("-50.00 collision")
-                    print('Yo fatal flag triggered, -50 for this.')
+                    print("Yo fatal flag triggered, -50 for this.")
                     # Remove this agent (vehicle + sensors) from the world
                     self.remove_agent(agent)
 
                 # ------------------------------------------------------------------
-                # Lane invasion penalty (no terminate by default)
+                # Lane invasion penalty (stage-based)
                 # ------------------------------------------------------------------
-                # ------------- Lane invasion penalty by stage -------------
                 lane_inv_flag = bool(getattr(agent, "had_lane_invasion", False))
                 if lane_inv_flag:
                     if self.reward_stage == 1:
@@ -761,7 +817,7 @@ class Manager:
                         r -= 50.0
                         done = True
                         events.append("-50.00 lane invasion (stage 3)")
-                        print('Lane invasion, fatal in stage 3')
+                        print("Lane invasion, fatal in stage 3")
                         agent.had_lane_invasion = False
                         self.remove_agent(agent)
 
@@ -787,6 +843,7 @@ class Manager:
                 self.remove_agent(agent)
 
         return rewards, dones
+
 
 
     # Visualize Path for each controlled
