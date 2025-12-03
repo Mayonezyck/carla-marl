@@ -80,6 +80,7 @@ class Manager:
             "back_from_wp": 0.0,
             "lat_pen": 0.0,
             "idle_pen": 0.0,
+            "speed_pen": 0.0,
             "steer_pen": 0.0,
             "intermediate": 0.0,
             "final": 0.0,
@@ -700,6 +701,7 @@ class Manager:
           - Moving away from goal      → stronger negative
           - Reward motion along line to next waypoint (v_along)
           - Penalize lateral motion relative to that line
+          - Penalize staying far from the goal for a long time (distance penalty)
           - Reaching goal              → big positive + done
           - Collision (fatal flag)     → big negative + done (agent removed)
           - Lane invasion              → stage-based penalty (can be fatal)
@@ -711,22 +713,28 @@ class Manager:
         dones = np.zeros(num_ctrl, dtype=bool)
 
         # ---- global tuning knobs ----
-        W_FORWARD = 2.0             # reward per meter progress
-        W_BACKWARD = 1.0            # penalty factor when moving away
+        # Weaker emphasis on "distance change" / speed:
+        W_FORWARD = 0.3           # was 1.0
+        W_BACKWARD = 1.0          # still punish going away, but not insanely
+        MAX_IDLE_STEPS = 20
+        IDLE_PENALTY = 1.0
+        NO_PROGRESS_DONE_STEPS = 80  # still unused
 
-        MAX_IDLE_STEPS = 40         # start counting "idle too long"
-        IDLE_PENALTY = 0.2          # per-step penalty once idle kicks in
-        NO_PROGRESS_DONE_STEPS = 80 # (currently not used as terminate)
-
-        STEER_MAG_PENALTY = 0.02    # penalty * |steer|
+        # Steering robustness: make steering clearly expensive
+        STEER_MAG_PENALTY = 0.12  # was 0.05 → much stronger
 
         # Line-following shaping
-        ALONG_REWARD_SCALE = 0.08   # reward per m/s toward waypoint
-        LAT_PENALTY_SCALE  = 0.02    # penalty per m/s lateral to that line
-        V_ALONG_CAP        = 8.0    # cap on how much along-speed we reward
+        # Less reward just for "going fast along the line"
+        ALONG_REWARD_SCALE = 0.02   # was 0.05
+        LAT_PENALTY_SCALE  = 0.15   # slightly stronger lateral penalty
+        V_ALONG_CAP        = 8.
+        
+        # NEW: distance penalty parameters
+        DIST_PENALTY_SCALE = 0.01   # per-meter penalty when far
+        DIST_PENALTY_MIN_DIST = 10.0  # don't penalize when already close
 
-        PROGRESS_EPS = 0.3  # meters; treat smaller as "no real progress"
 
+        # Stage-based time penalty
         if self.reward_stage == 1:
             time_pen = 0.01
         elif self.reward_stage == 2:
@@ -734,11 +742,15 @@ class Manager:
         else:  # stage 3+
             time_pen = 0.02
 
-        
-
-
         for i, agent in enumerate(self.controlled_agents):
+            # Count step for stats
             self.reward_stats["steps"] += 1.0
+
+            # Default
+            r = 0.0
+            done = False
+            events = []
+
             # Agent missing or no vehicle → treat as done with zero reward
             if agent is None:
                 dones[i] = True
@@ -766,27 +778,29 @@ class Manager:
                     rewards[i] = 0.0
                     continue
 
-                # ------------------------------------------------------------------
+                    # ------------------------------------------------------------------
                 # Distance-based progress toward current goal (subgoal or final)
                 # ------------------------------------------------------------------
                 tf = vehicle.get_transform()
                 loc = tf.location
 
-                # Determine current goal:
-                #   - intermediate waypoint if available
-                #   - otherwise final destination
+                # Use the SAME logic as observations to pick the current goal.
+                # This function will also advance current_wp_index if it skips
+                # waypoints that are behind the ego.
+                goal_loc = self.get_current_goal_location(agent)
+
+                # After calling get_current_goal_location, current_wp_index may
+                # have changed. Recompute route / is_final_goal consistently.
                 route = getattr(agent, "current_waypoint_plan", None)
                 wp_idx = int(getattr(agent, "current_wp_index", 0))
 
                 use_route = route is not None and len(route) > 0
-                is_final_goal = True  # assume final until proven otherwise
-
                 if use_route and 0 <= wp_idx < len(route):
-                    wp, _ = route[wp_idx]
-                    goal_loc = wp.transform.location
                     is_final_goal = (wp_idx == len(route) - 1)
                 else:
-                    goal_loc = getattr(agent, "destination", loc)
+                    # No valid route or index out of range => we are effectively
+                    # targeting the final destination.
+                    use_route = False
                     is_final_goal = True
 
                 dx = float(goal_loc.x) - float(loc.x)
@@ -810,11 +824,26 @@ class Manager:
                     v_along = vx * ux + vy * uy   # m/s toward waypoint (can be negative)
 
                     # lateral speed = |v × u| in 2D
-                    # cross(v, u)_z = vx*uy - vy*ux → magnitude is lateral component
                     lat_speed = abs(vx * uy - vy * ux)
                 else:
                     v_along = 0.0
                     lat_speed = 0.0
+
+                # ---------------- Speed penalty (de-emphasize going fast) ----------------
+                # Prefer moderate speeds; penalize going too fast.
+                SPEED_COMFORT = 8.0        # m/s (~30 km/h)
+                SPEED_HARD_CAP = 15.0      # beyond this we don't care about extra speed
+                SPEED_PENALTY_SCALE = 0.05
+
+                if speed > SPEED_COMFORT:
+                    # excess above comfort, clipped
+                    excess = min(speed, SPEED_HARD_CAP) - SPEED_COMFORT
+                    speed_pen = SPEED_PENALTY_SCALE * excess
+                    if speed_pen > 0.0:
+                        r -= speed_pen
+                        self._accum_reward("speed_pen", -speed_pen)
+                        events.append(f"-{speed_pen:.2f} speed > comfort")
+
 
                 # previous distance stored on agent (per-episode), for THIS goal
                 dist_prev = getattr(agent, "prev_dist_to_goal", None)
@@ -825,16 +854,13 @@ class Manager:
 
                 # ---- idle / stall tracking based on progress ----
                 idle_steps = getattr(agent, "idle_steps", 0)
-                
+                PROGRESS_EPS = 0.1  # meters; treat smaller as "no real progress"
 
                 if abs(progress) < PROGRESS_EPS:
                     idle_steps += 1
                 else:
                     idle_steps = 0
                 agent.idle_steps = idle_steps
-
-                r = 0.0
-                events = []
 
                 # ---------------- Progress shaping (main term) ----------------
                 if progress > 0.0:
@@ -846,7 +872,7 @@ class Manager:
                     contrib = W_BACKWARD * progress  # progress is negative here
                     r += contrib
                     self._accum_reward("backward", contrib)
-                    events.append(f"+{contrib:.2f} moving away")
+                    events.append(f"{contrib:.2f} moving away")
 
                 # ---------------- Line-following shaping ----------------
                 # Reward moving along the line to the waypoint,
@@ -869,6 +895,14 @@ class Manager:
                     self._accum_reward("lat_pen", -lat_pen)
                     events.append(f"-{lat_pen:.2f} lateral deviation")
 
+                # ---------------- Distance penalty (NEW) ----------------
+                # If you're far from the current goal, every step costs you.
+                if dist > DIST_PENALTY_MIN_DIST:
+                    dist_over = dist - DIST_PENALTY_MIN_DIST
+                    dist_pen = DIST_PENALTY_SCALE * dist_over
+                    r -= dist_pen
+                    self._accum_reward("dist_pen", -dist_pen)
+                    events.append(f"-{dist_pen:.2f} distance penalty")
 
                 # ---------------- Idle / no-progress penalties ----------------
                 if idle_steps > MAX_IDLE_STEPS and dist > 10.0:
@@ -879,7 +913,6 @@ class Manager:
 
                 # Hard terminate on no progress: currently disabled,
                 # but you can re-enable if you want.
-                done = False
                 # if idle_steps > NO_PROGRESS_DONE_STEPS and dist > 10.0:
                 #     done = True
                 #     extra_pen = 5.0
@@ -900,7 +933,6 @@ class Manager:
                         r -= steer_pen
                         self._accum_reward("steer_pen", -steer_pen)
                         events.append(f"-{steer_pen:.2f} steer penalty")
-
 
                 # ------------------------------------------------------------------
                 # Goal reached logic:
@@ -931,7 +963,6 @@ class Manager:
                         agent.prev_dist_to_goal = None
                         self.remove_agent(agent)
 
-
                 # ------------------------------------------------------------------
                 # Collision penalty (using your fatal flag)
                 # ------------------------------------------------------------------
@@ -942,7 +973,6 @@ class Manager:
                     events.append("-50.00 collision")
                     print("Yo fatal flag triggered, -50 for this.")
                     self.remove_agent(agent)
-
 
                 # ------------------------------------------------------------------
                 # Lane invasion penalty (stage-based)
@@ -971,13 +1001,10 @@ class Manager:
                         agent.had_lane_invasion = False
                         self.remove_agent(agent)
 
-
-                # # ------------- Per-step time penalty -------------
+                # ------------- Per-step time penalty -------------
                 r -= time_pen
                 self._accum_reward("time_pen", -time_pen)
-
-                # r -= STEP_TIME_PEN
-                # events.append(f"-{STEP_TIME_PEN:.3f} time")
+                events.append(f"-{time_pen:.3f} time")
 
                 agent.last_reward_events = events
 
@@ -993,6 +1020,7 @@ class Manager:
                 self.remove_agent(agent)
 
         return rewards, dones
+
 
 
 
