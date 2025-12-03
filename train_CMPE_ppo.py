@@ -342,7 +342,7 @@ def main():
                 except Exception as e:
                     print(f"[PPO] Failed to save video for update {update_idx + 1}: {e}")
 
-
+            world.manager.print_and_reset_reward_stats()
             # ---- end of rollout, build PPO batch ----
             obs_arr = np.stack(obs_buf, axis=0)      # (T, N, obs_dim)
             act_arr = np.stack(act_buf, axis=0)      # (T, N, 2)
