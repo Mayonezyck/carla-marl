@@ -99,7 +99,7 @@ class Agent:
                 # - first waypoint is guaranteed to be in front of the vehicle
                 route_wps, dest_loc = self._build_forward_route(
                     start_location=start,
-                    min_distance=250.0,   # tweak as you like
+                    min_distance=2500.0,   # tweak as you like
                     step=2.0,
                 )
 
@@ -239,7 +239,7 @@ class Agent:
         start_location: carla.Location,
         min_distance: float = 500.0,
         step: float = 2.0,
-        max_steps: int = 1000,
+        max_steps: int = 5000,
     ):
         """
         Build a dense route by walking forward along the driving lane from

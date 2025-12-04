@@ -48,12 +48,35 @@ except ImportError:
 
 # Class labels (same order as the palette)
 CLASS_LABELS = [
-    "None", "Buildings", "Fences", "Other", "Pedestrians", "Poles", "RoadLines",
-    "Roads", "Sidewalks", "Vegetation", "Vehicles", "Walls", "TrafficSigns", "Sky",
-    "Ground", "Bridge", "RailTrack", "GuardRail", "TrafficLight", "Static", "Dynamic",
-    "Water", "Terrain", "Unused_23", "Unused_24", "Unused_25", "Unused_26", "Unused_27"
+    "Unlabeled",     # 0
+    "Road",          # 1
+    "Sidewalk",      # 2
+    "Building",      # 3
+    "Wall",          # 4
+    "Fence",         # 5
+    "Pole",          # 6
+    "TrafficLight",  # 7
+    "TrafficSign",   # 8
+    "Vegetation",    # 9
+    "Terrain",       # 10
+    "Sky",           # 11
+    "Pedestrian",    # 12
+    "Rider",         # 13
+    "Car",           # 14
+    "Truck",         # 15
+    "Bus",           # 16
+    "Train",         # 17
+    "Motorcycle",    # 18
+    "Bicycle",       # 19
+    "Static",        # 20
+    "Dynamic",       # 21
+    "Other",         # 22
+    "Water",         # 23
+    "RoadLine",      # 24
+    "Ground",        # 25
+    "Bridge",        # 26
+    "RailTrack",     # 27
 ]
-
 
 def make_color_legend(
     palette,

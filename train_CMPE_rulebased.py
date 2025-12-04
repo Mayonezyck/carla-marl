@@ -41,12 +41,12 @@ OBST_STOP  = "stop_for_obstacle"
 # OBST_SLOW_DIST = 12.0   # <= this -> slow
 # OBST_CLEAR_DIST = 24.0  # beyond this -> totally clear
 
-TARGET_SPEED_NORMAL = 10.0   # m/s ~ 36 km/h
+TARGET_SPEED_NORMAL = 8.0   # m/s ~ 36 km/h
 TARGET_SPEED_APPROACH = TARGET_SPEED_NORMAL * 0.6  # m/s ~ 18 km/h
 STOP_DISTANCE_M = 5        # within 3m of goal -> stop
 APPROACH_DISTANCE_M = 20.0   # within 20m of goal -> approach_goal
 
-LOOKAHEAD_STEPS = 2    # how far ahead along the route to aim
+LOOKAHEAD_STEPS = 1    # how far ahead along the route to aim
 K_STEER_PP      = 1.5  # gain for pure-pursuit steering (tune 0.8–1.5)
 WHEELBASE_M     = 2.8  # approximate vehicle wheelbase for curvature calc
 
@@ -54,7 +54,7 @@ WHEELBASE_M     = 2.8  # approximate vehicle wheelbase for curvature calc
 PEDESTRIAN_CLASS = 26
 #PEDESTRIAN_CLASS_2 = 12
 VEHICLE_CLASS    = 14
-VEHICLE_CLASS_2 = 15
+VEHICLE_CLASS_2 = 15 # this is absolutely right<`` but sometimes cause glitch
 
 ROADLINE_CLASS = 24
 TRAFFIC_SIGN_CLASS = 12
@@ -859,19 +859,13 @@ def compute_min_obstacle_depth(seg_ids: np.ndarray,
     """
     Use segmentation + depth to estimate the nearest obstacle distance.
 
-    seg_ids   : (H, W) int class indices
-    depth_map : (H, W) float32 in meters, aligned with seg_ids
-
-    If use_roi:
-      only consider a central-bottom ROI (same spirit as compute_obstacle_proximity),
-      so we react mainly to obstacles actually in our lane & near in front.
-
     Returns:
-      min_depth (float, meters) of any pedestrian/vehicle pixel in ROI,
-      or None if no such pixels.
+      (min_depth, class_id) where:
+        - min_depth: float in meters, or None if no obstacle
+        - class_id : int (segmentation class index) of that nearest obstacle, or None
     """
     if seg_ids is None or depth_map is None:
-        return None
+        return None, None
 
     if seg_ids.shape != depth_map.shape:
         raise ValueError(f"seg_ids shape {seg_ids.shape} != depth_map shape {depth_map.shape}")
@@ -891,48 +885,34 @@ def compute_min_obstacle_depth(seg_ids: np.ndarray,
 
         trap = trapezoid_mask(h, w, y0, y1, x_lt, x_rt, x_lb, x_rb)
 
-        seg_roi_mask = trap
-        depth_roi = depth_map  # we’ll index by mask below
+        roi_mask = trap
     else:
-        seg_roi_mask = np.ones_like(seg_ids, dtype=bool)
-        depth_roi = depth_map
+        roi_mask = np.ones_like(seg_ids, dtype=bool)
 
-    # if use_roi:
-    #     h, w = seg_ids.shape
-    #     y0 = max(0, min(ROI_Y_START, h))
-    #     y1 = max(0, min(ROI_Y_END,   h))
-    #     x0 = max(0, min(ROI_X_START, w))
-    #     x1 = max(0, min(ROI_X_END,   w))
-
-    #     if y1 <= y0 or x1 <= x0:
-    #         return None  # bad ROI => no info
-
-    #     seg_roi   = seg_ids[y0:y1, x0:x1]
-    #     depth_roi = depth_map[y0:y1, x0:x1]
-    # else:
-    #     seg_roi   = seg_ids
-    #     depth_roi = depth_map
-
-    # mask of all ped/vehicle pixels in ROI
-    # mask = np.isin(seg_roi, list(OBSTACLE_CLASSES))
-    # if not mask.any():
-    #     return None
-
-    # obstacle_depths = depth_roi[mask]
-    # mask of all ped/vehicle pixels within ROI mask
-    mask_obst = np.logical_and(seg_roi_mask, np.isin(seg_ids, list(OBSTACLE_CLASSES)))
+    # pixels that are both in ROI and belong to an obstacle class
+    mask_obst = np.logical_and(roi_mask, np.isin(seg_ids, list(OBSTACLE_CLASSES)))
     if not mask_obst.any():
-        return None
+        return None, None
 
-    obstacle_depths = depth_map[mask_obst]
+    ys, xs = np.where(mask_obst)
+    depths = depth_map[ys, xs]
 
-    obstacle_depths = obstacle_depths[np.isfinite(obstacle_depths)]
-    obstacle_depths = obstacle_depths[obstacle_depths > 0.1]  # ignore junk very close to 0
+    # keep only valid depths
+    valid = np.isfinite(depths) & (depths > 0.1)
+    if not valid.any():
+        return None, None
 
-    if obstacle_depths.size == 0:
-        return None
+    depths_valid = depths[valid]
+    ys_valid = ys[valid]
+    xs_valid = xs[valid]
 
-    return float(obstacle_depths.min())
+    idx_min = int(np.argmin(depths_valid))
+    min_depth = float(depths_valid[idx_min])
+
+    # nearest pixel's class id
+    class_id = int(seg_ids[ys_valid[idx_min], xs_valid[idx_min]])
+
+    return min_depth, class_id
 
 
 
@@ -1041,6 +1021,7 @@ def main():
 
         obstacle_state = OBST_CLEAR
         min_obstacle_depth = None
+        min_obstacle_class = None  
 
         # Prime the world once so sensors start producing data
         world.tick()
@@ -1097,8 +1078,13 @@ def main():
                 # --- STOP patch detection (segmentation-only) ---
                 stop_patch_detected = detect_stop_patch(seg_ids)
 
-                # 🔎 nearest obstacle distance (meters)
-                min_obstacle_depth = compute_min_obstacle_depth(seg_ids, depth_map)
+                # 🔎 nearest obstacle distance (meters) + class id
+                prev_obstacle_state = obstacle_state  # track old state
+
+                min_obstacle_depth, min_obstacle_class = compute_min_obstacle_depth(
+                    seg_ids,
+                    depth_map,
+                )
 
                 # update obstacle state using distance
                 obstacle_state = update_obstacle_state_from_depth(
@@ -1106,6 +1092,16 @@ def main():
                     min_obstacle_depth,
                     speed,
                 )
+
+                # Debug: when we *enter* "stop_for_obstacle", print who is doing it
+                if (obstacle_state == OBST_STOP and
+                    prev_obstacle_state != OBST_STOP and
+                    min_obstacle_depth is not None and
+                    min_obstacle_class is not None):
+                    print(
+                        f"[OBST STOP] class_id={min_obstacle_class} "
+                        f"at {min_obstacle_depth:.1f} m"
+                    )
 
             # ---- Ego position from GNSS only ----
             gnss = controlled_agent.get_gnss_latest()
