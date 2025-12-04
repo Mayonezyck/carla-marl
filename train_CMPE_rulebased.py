@@ -36,11 +36,10 @@ OBST_CLEAR = "clear"
 OBST_SLOW  = "slow"
 OBST_STOP  = "stop_for_obstacle"
 
-# Obstacle distance thresholds (meters) for behavior
-OBST_STOP_DIST = 6.0    # <= this -> full stop
-OBST_SLOW_DIST = 12.0   # <= this -> slow
-OBST_CLEAR_DIST = 25.0  # beyond this -> totally clear
-
+# # Obstacle distance thresholds (meters) for behavior
+# OBST_STOP_DIST = 6.0    # <= this -> full stop
+# OBST_SLOW_DIST = 12.0   # <= this -> slow
+# OBST_CLEAR_DIST = 24.0  # beyond this -> totally clear
 
 TARGET_SPEED_NORMAL = 10.0   # m/s ~ 36 km/h
 TARGET_SPEED_APPROACH = TARGET_SPEED_NORMAL * 0.6  # m/s ~ 18 km/h
@@ -59,10 +58,9 @@ ROADLINE_CLASS = 24
 TRAFFIC_SIGN_CLASS = 12
 OBSTACLE_CLASSES = {PEDESTRIAN_CLASS, VEHICLE_CLASS}
 
-
 # Stop-sign patch behavior (simple ROI-based detector)
 STOP_PATCH_MIN_FRACTION   = 0.35   # 80% of ROI pixels == ROADLINE_CLASS -> STOP
-STOP_SIGN_WAIT_STEPS      = 60    # how long to wait at STOP (60 * 0.05s = 3s)
+STOP_SIGN_WAIT_STEPS      = 60   # how long to wait at STOP (60 * 0.05s = 3s)
 STOP_SIGN_COOLDOWN_STEPS  = 200   # steps before we can trigger another STOP
 
 # ROI for stop line detection (tune as needed)
@@ -221,23 +219,45 @@ def update_ego_state(current_state, dist_to_goal, speed) -> str:
         return STATE_NORMAL
 
 
-def update_obstacle_state_from_depth(current_state: str, min_depth) -> str:
+def update_obstacle_state_from_depth(current_state: str,
+                                     min_depth: float,
+                                     speed: float) -> str:
     """
-    Decide obstacle state from the nearest obstacle depth (in meters).
-
-    min_depth:
-      None -> no obstacle
-      small -> very close
+    Decide obstacle state from the nearest obstacle depth (in meters)
+    and current speed (m/s).
     """
-    if min_depth is None:
+    if min_depth is None or not np.isfinite(min_depth):
         return OBST_CLEAR
 
-    if min_depth <= OBST_STOP_DIST:
+    # Clamp speed so thresholds don't collapse to ~0 at very low speed
+    v = max(speed, 0.1)  # m/s
+
+    # Time horizons (seconds)
+    STOP_TIME  = 1.0   # ~1 s to obstacle -> stop
+    SLOW_TIME  = 2.0   # ~2 s -> slow
+    CLEAR_TIME = 4.0   # ~4 s -> very comfortable
+
+    # Convert to distance thresholds
+    stop_dist  = v * STOP_TIME
+    slow_dist  = v * SLOW_TIME
+    clear_dist = v * CLEAR_TIME
+
+    # Optional: enforce some minimums so at low speed you still react early
+    stop_dist  = max(stop_dist,  3.0)   # at least 3 m
+    slow_dist  = max(slow_dist,  6.0)   # at least 6 m
+    clear_dist = max(clear_dist, 12.0)  # at least 12 m
+
+    # Now classify
+    if min_depth <= stop_dist:
         return OBST_STOP
-    elif min_depth <= OBST_SLOW_DIST:
+    elif min_depth <= slow_dist:
         return OBST_SLOW
-    else:
+    elif min_depth >= clear_dist:
         return OBST_CLEAR
+    else:
+        # In between slow_dist and clear_dist -> mildly cautious
+        return OBST_SLOW
+
 
 def build_trapezoid_pixel_coords(
     h: int,
@@ -1051,7 +1071,8 @@ def main():
                 if step % 50 == 0:
                     print(f"GNSS: lat={lat:.7f}, lon={lon:.7f}, alt={alt:.2f}")
 
-
+            vel = vehicle.get_velocity()  # speedometer
+            speed = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
 
             if latest_cam_image is not None:
                 # Convert to numpy for UNet
@@ -1084,7 +1105,9 @@ def main():
                 obstacle_state = update_obstacle_state_from_depth(
                     obstacle_state,
                     min_obstacle_depth,
+                    speed,
                 )
+
             # ---- Ego position from GNSS only ----
             gnss = controlled_agent.get_gnss_latest()
             if gnss is not None:
@@ -1126,8 +1149,7 @@ def main():
                     current_wp_idx += 1
 
 
-            vel = vehicle.get_velocity()  # speedometer
-            speed = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
+
 
             # Distance to final GNSS waypoint (if any)
             dist_to_goal = compute_dist_to_goal(rel_x, rel_y, route_points_rel)
@@ -1300,6 +1322,23 @@ def main():
                 throttle = max(0.0, min(1.0, speed_error / 5.0))
             elif speed_error < -0.5:
                 brake = max(0.0, min(1.0, -speed_error / 5.0))
+            # --- Hard stop behavior, but not full emergency slam ---
+            if ego_state == STATE_STOP or obstacle_state == OBST_STOP:
+                # Never accelerate while we intend to stop
+                throttle = 0.0
+
+                if speed > 2.0:
+                    # Still moving fairly fast -> let the controller brake more strongly,
+                    # but cap minimum brake for a decisive slowdown.
+                    brake = max(brake, 0.6)
+                elif speed > 0.3:
+                    # Creeping -> gentle braking, no throttle
+                    brake = max(brake, 0.3)
+                else:
+                    # Almost fully stopped -> just "hold" the car in place lightly
+                    brake = max(brake, 0.2)
+
+            
 
             control = carla.VehicleControl()
             control.steer = float(steer)
