@@ -17,7 +17,8 @@ from config import ConfigLoader
 from world import CarlaWorld
 from RL_handler import RLHandler
 from remote_policy import RemoteSimPolicy
-from RL_handler import RLHandler, CMPE_OBS_DIM, STEER_BINS, ACCEL_BINS
+from RL_handler import RLHandler, CMPE_OBS_DIM, STEER_BINS, ACCEL_BINS, SEG_DEPTH_H, SEG_DEPTH_W
+
 from dqn_policy import DQNPolicy
 from visualizer_cmpe import PygameVisualizer
 
@@ -109,7 +110,7 @@ if __name__ == "__main__":
             epsilon_decay_steps=50_000,
             target_update_freq=1000,
             cmpe_dim=10,          # first 10 are the scalar features
-            img_channels=2,       # seg + depth
+            img_channels=3,       # seg + depth
             img_height=128,
             img_width=128,
         )
@@ -150,6 +151,11 @@ if __name__ == "__main__":
     )
 
     global_step = 0
+    # ---- Training metrics history ----
+    return_history = []
+    length_history = []
+    success_history = []  # 1 if reached goal, 0 otherwise
+
 
     try:
         for ep in range(1, max_episodes + 1):
@@ -213,6 +219,7 @@ if __name__ == "__main__":
                 ego_cam_rgb = None
                 seg_img = None
                 depth_img = None
+                hud_img = None
 
                 # --------- grab latest camera data from controlled agent 0 ---------
                 if len(world.manager.controlled_agents) > 0:
@@ -230,6 +237,22 @@ if __name__ == "__main__":
                         # Depth
                         if hasattr(ego_agent, "get_depth_latest"):
                             depth_img = ego_agent.get_depth_latest()
+
+                                # --------- reconstruct HUD goal channel from obs[0] ---------
+                if obs.shape[0] > 0:
+                    ego_obs = obs[0]
+                    CORE_DIM = 10  # first 10 are scalar ego features
+
+                    flat_len = SEG_DEPTH_H * SEG_DEPTH_W
+                    needed = CORE_DIM + 3 * flat_len
+
+                    if ego_obs.shape[0] >= needed:
+                        offset = CORE_DIM
+                        # seg_flat   = ego_obs[offset               : offset + flat_len]
+                        # depth_flat = ego_obs[offset + flat_len    : offset + 2 * flat_len]
+                        hud_flat   = ego_obs[offset + 2 * flat_len : offset + 3 * flat_len]
+                        hud_img = hud_flat.reshape(SEG_DEPTH_H, SEG_DEPTH_W)
+
 
                 # Layout:
                 #   RGB:  left, size 480x360 at (0, 0)
@@ -299,6 +322,23 @@ if __name__ == "__main__":
                         depth_surface = pygame.transform.scale(depth_surface, (320, 180))
                         screen.blit(depth_surface, (480, 180))
 
+                                # --------- draw HUD goal mask (from obs) ---------
+                if hud_img is not None:
+                    hud_arr = np.asarray(hud_img, dtype=np.float32)
+                    # hud is in [0,1], map to [0,255] grayscale
+                    hud_norm = np.clip(hud_arr, 0.0, 1.0)
+                    hud_vis = (hud_norm * 255.0).astype(np.uint8)
+                    hud_vis = np.stack([hud_vis] * 3, axis=-1)  # grayscale → RGB
+
+                    hud_surface = pygame.surfarray.make_surface(
+                        hud_vis.swapaxes(0, 1)
+                    )
+                    # Make it a bit shorter to leave space for text
+                    hud_surface = pygame.transform.scale(hud_surface, (320, 120))
+                    # Place under depth panel
+                    screen.blit(hud_surface, (480, 360))
+
+
                 # --------- build and draw text (multi-column) ---------
                 info_lines = [
                     f"Episode: {ep}",
@@ -333,7 +373,7 @@ if __name__ == "__main__":
                         event_lines.append(ev_str)
 
                 # ---- layout text in columns along the bottom ----
-                base_y = 380
+                base_y = 500
                 line_h = 20
 
                 # Left block: info + obs, packed in columns
@@ -393,6 +433,41 @@ if __name__ == "__main__":
                 # 5) Advance the CARLA world one tick
                 world.tick()
 
+            # ---- Episode summary metrics ----
+            # Note: step_in_ep will be the last value from the loop
+            ep_len = step_in_ep
+            ep_return = episode_reward
+
+            # For now, define success as "ego reached its final goal"
+            ep_success = 0
+            if len(world.manager.controlled_agents) > 0:
+                ego_agent = world.manager.controlled_agents[0]
+                if getattr(ego_agent, "reached_final_goal", False):
+                    ep_success = 1
+
+            return_history.append(ep_return)
+            length_history.append(ep_len)
+            success_history.append(ep_success)
+
+            # Print moving averages over the last 50 episodes
+            window = 50
+            recent_returns = return_history[-window:]
+            recent_lengths = length_history[-window:]
+            recent_success = success_history[-window:]
+
+            avg_ret = np.mean(recent_returns)
+            avg_len = np.mean(recent_lengths)
+            avg_succ = np.mean(recent_success)
+
+            print(
+                f"[train_CMPE] Ep {ep} done | "
+                f"R_ep={ep_return:.2f}, T_ep={ep_len}, success={ep_success} | "
+                f"MA{window}: R={avg_ret:.2f}, T={avg_len:.1f}, succ={avg_succ:.2f}"
+            )
+
+            # Optional: print reward term breakdown
+            world.manager.print_and_reset_reward_stats()
+
             # End of one episode
             # Save episode video
             if len(video_frames) > 0:
@@ -428,5 +503,18 @@ if __name__ == "__main__":
             print("[train_CMPE] Error saving debug history:", repr(e))
 
         # Clean up CARLA actors via CarlaWorld
+                # Save training metrics for plotting
+        try:
+            import csv
+            metrics_path = base_output_dir / "training_metrics.csv"
+            with open(metrics_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["episode", "return", "length", "success"])
+                for i, (r, t, s) in enumerate(zip(return_history, length_history, success_history), start=1):
+                    writer.writerow([i, r, t, s])
+            print(f"[train_CMPE] Saved training metrics to {metrics_path}")
+        except Exception as e:
+            print("[train_CMPE] Error saving training metrics:", repr(e))
+    
         world.cleanup()
         print("[train_CMPE] Cleanup complete.")

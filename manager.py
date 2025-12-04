@@ -327,6 +327,100 @@ class Manager:
         return chosen_loc
 
 
+    def _build_goal_hud(self, agent) -> np.ndarray:
+        """
+        Build a 2D HUD mask (SEG_DEPTH_H x SEG_DEPTH_W) showing
+        where the current goal is relative to the ego.
+
+        Encoding:
+          - 0.0 everywhere by default
+          - 0.3 along the line from ego position to goal
+          - 1.0 in a fat blob around the goal point
+        """
+        hud = np.zeros((SEG_DEPTH_H, SEG_DEPTH_W), dtype=np.float32)
+
+        vehicle = getattr(agent, "vehicle", None)
+        if vehicle is None:
+            return hud
+
+        # --- ego pose ---
+        tf = vehicle.get_transform()
+        loc = tf.location
+        yaw_rad = math.radians(tf.rotation.yaw)
+
+        # --- goal in world ---
+        goal_loc = self.get_current_goal_location(agent)
+
+        dx = float(goal_loc.x) - float(loc.x)
+        dy = float(goal_loc.y) - float(loc.y)
+
+        cos_e = math.cos(yaw_rad)
+        sin_e = math.sin(yaw_rad)
+
+        # ego frame: x forward, y left
+        rel_x = cos_e * dx + sin_e * dy      # forward (m)
+        rel_y = -sin_e * dx + cos_e * dy     # left/right (m)
+
+        # --- crude “camera-ish” projection into HUD coords ---
+        # Define a view frustum:
+        FWD_MIN = 0.0     # start at bumper
+        FWD_MAX = 50.0    # 50 m ahead
+        LAT_MAX = 15.0    # ±15 m sideways
+
+        # Clamp into view region
+        rel_x_clamped = max(FWD_MIN, min(FWD_MAX, rel_x))
+        rel_y_clamped = max(-LAT_MAX, min(LAT_MAX, rel_y))
+
+        # Normalize to [0, 1] → then to pixels
+        # u: horizontal (0 = left, 1 = right)
+        # v: vertical   (0 = far ahead, 1 = near ego)
+        if FWD_MAX > FWD_MIN:
+            v_norm = 1.0 - (rel_x_clamped - FWD_MIN) / (FWD_MAX - FWD_MIN)
+        else:
+            v_norm = 0.5
+
+        u_norm = 0.5 + 0.5 * (rel_y_clamped / LAT_MAX) if LAT_MAX > 0 else 0.5
+
+        u = int(np.clip(u_norm * (SEG_DEPTH_W - 1), 0, SEG_DEPTH_W - 1))
+        v = int(np.clip(v_norm * (SEG_DEPTH_H - 1), 0, SEG_DEPTH_H - 1))
+
+        # --- ego position in HUD (put it near bottom center) ---
+        cx = SEG_DEPTH_W // 2
+        cy = SEG_DEPTH_H - 1
+
+        # --- draw line from ego (cx, cy) to goal (u, v) with value 0.3 ---
+        dx_pix = u - cx
+        dy_pix = v - cy
+        steps = max(abs(dx_pix), abs(dy_pix))
+
+        if steps == 0:
+            # goal projects right under the ego
+            if 0 <= cy < SEG_DEPTH_H and 0 <= cx < SEG_DEPTH_W:
+                hud[cy, cx] = max(hud[cy, cx], 0.3)
+        else:
+            for i in range(steps + 1):
+                t = i / float(steps)
+                x = int(round(cx + t * dx_pix))
+                y = int(round(cy + t * dy_pix))
+                if 0 <= y < SEG_DEPTH_H and 0 <= x < SEG_DEPTH_W:
+                    hud[y, x] = max(hud[y, x], 0.3)
+
+        # --- draw fat goal blob (disk) with value 1.0 ---
+        R = 8  # radius in pixels
+        x0 = max(0, u - R)
+        x1 = min(SEG_DEPTH_W - 1, u + R)
+        y0 = max(0, v - R)
+        y1 = min(SEG_DEPTH_H - 1, v + R)
+        R2 = R * R
+
+        for yy in range(y0, y1 + 1):
+            dy2 = (yy - v) * (yy - v)
+            for xx in range(x0, x1 + 1):
+                if (xx - u) * (xx - u) + dy2 <= R2:
+                    hud[yy, xx] = 1.0
+
+        return hud
+
 
     def get_agent_cmpe_style_obs(self, agent) -> np.ndarray:
         """
@@ -455,18 +549,17 @@ class Manager:
             ],
             dtype=np.float32,
         )
-
         # ------------------------------------------------------------------
-        # 7) Append seg + depth images (128x128 each)
+        # 7) Append seg + depth images (128x128 each) + goal HUD (128x128)
         # ------------------------------------------------------------------
         seg = agent.get_seg_latest() if hasattr(agent, "get_seg_latest") else None
         depth = agent.get_depth_latest() if hasattr(agent, "get_depth_latest") else None
 
         if seg is None or depth is None:
-            seg_flat = np.zeros(SEG_DEPTH_H * SEG_DEPTH_W, dtype=np.float32)
+            seg_flat   = np.zeros(SEG_DEPTH_H * SEG_DEPTH_W, dtype=np.float32)
             depth_flat = np.zeros(SEG_DEPTH_H * SEG_DEPTH_W, dtype=np.float32)
+            hud_flat   = np.zeros(SEG_DEPTH_H * SEG_DEPTH_W, dtype=np.float32)
         else:
-            # seg: int labels, CARLA doc says 13 classes → IDs in [0, 12]
             seg = np.asarray(seg, dtype=np.int32)
             depth = np.asarray(depth, dtype=np.float32)
 
@@ -476,7 +569,6 @@ class Manager:
                 f"depth shape {depth.shape} != {(SEG_DEPTH_H, SEG_DEPTH_W)}"
 
             # --- Segmentation normalization ---
-            # 13 classes → labels in [0, 12], map to [0, 1]
             max_label = 12.0
             seg_norm = np.clip(seg.astype(np.float32), 0.0, max_label) / max_label
 
@@ -485,10 +577,15 @@ class Manager:
             depth_clipped = np.clip(depth, 0.0, depth_cap)
             depth_norm = depth_clipped / depth_cap  # [0, 1]
 
-            seg_flat = seg_norm.reshape(-1).astype(np.float32)
-            depth_flat = depth_norm.reshape(-1).astype(np.float32)
+            # --- Goal HUD channel ---
+            hud_mask = self._build_goal_hud(agent)  # (128, 128), [0,1]
 
-        full_obs = np.concatenate([core_obs, seg_flat, depth_flat], axis=0)
+            seg_flat   = seg_norm.reshape(-1).astype(np.float32)
+            depth_flat = depth_norm.reshape(-1).astype(np.float32)
+            hud_flat   = hud_mask.reshape(-1).astype(np.float32)
+
+        # Concatenate: 10 ego scalars + seg + depth + goal_hud
+        full_obs = np.concatenate([core_obs, seg_flat, depth_flat, hud_flat], axis=0)
 
         if full_obs.shape[0] != CMPE_OBS_DIM:
             raise ValueError(
@@ -496,6 +593,7 @@ class Manager:
             )
 
         return full_obs
+
         # return core_obs
 
 

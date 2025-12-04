@@ -33,7 +33,7 @@ class Controlled_Agents(Agent):
     """
 
     def __init__(self, world: carla.World, index: int, config: Dict[str, Any]):
-        super().__init__(world, index, config, role_prefix="controlled_agent", seed = 13)
+        super().__init__(world, index, config, role_prefix="controlled_agent", seed = 256)
         # self.starting_point: carla.Location = (
         #     self.vehicle.get_transform().location if self.vehicle is not None else None
         # )
@@ -49,6 +49,10 @@ class Controlled_Agents(Agent):
         self._collision_event = [] #I use a list to record the events, should I just cache one?
         self._had_collision = False
         self.had_lane_invasion = False
+         # GNSS buffers
+        self._gnss_queue: "queue.Queue[tuple[float, float, float]]" = queue.Queue()
+        self._last_gnss: Optional[tuple[float, float, float]] = None  # (lat, lon, alt)
+
         self.last_control = None
         self._fatal_collision = False #Currently this will log any collision as fatal, later can be tweeked to check only significant events (e.g. collision with vehicle/ped)
         # Initialize start/end and plan a route
@@ -64,6 +68,16 @@ class Controlled_Agents(Agent):
                     self.destination
                 )
                 self._route_debug_enabled = True
+
+        # Precompute route geolocations (lat, lon, alt) once
+        self.route_geo: list[carla.GeoLocation] = []
+        if self.current_waypoint_plan:
+            world_map = self.world.get_map()
+            self.route_geo = [
+                world_map.transform_to_geolocation(wp.transform.location)
+                for (wp, _) in self.current_waypoint_plan
+            ]
+
 
         self._lane_invasion_events: list[carla.LaneInvasionEvent] = []
         self.had_lane_invasion = False
@@ -151,6 +165,36 @@ class Controlled_Agents(Agent):
 
         lane_sensor.listen(lane_invasion_callback)
         self.sensors.append(lane_sensor)
+        # ----------------------------
+        # GNSS sensor
+        # ----------------------------
+        if self.vehicle is not None:
+            bp_lib = self.world.get_blueprint_library()
+            gnss_bp = bp_lib.find("sensor.other.gnss")
+
+            # You can tweak noise here if you want realism:
+            # gnss_bp.set_attribute("noise_alt_stddev", "0.0")
+            # gnss_bp.set_attribute("noise_lat_stddev", "0.0")
+            # gnss_bp.set_attribute("noise_lon_stddev", "0.0")
+
+            gnss_tf = carla.Transform(
+                carla.Location(x=0.0, y=0.0, z=2.0),
+                carla.Rotation(pitch=0.0, yaw=0.0, roll=0.0),
+            )
+
+            gnss = self.world.spawn_actor(gnss_bp, gnss_tf, attach_to=self.vehicle)
+
+            def _gnss_callback(meas: carla.GnssMeasurement):
+                # meas.latitude, meas.longitude, meas.altitude
+                data = (float(meas.latitude), float(meas.longitude), float(meas.altitude))
+                self._last_gnss = data
+                try:
+                    self._gnss_queue.put_nowait(data)
+                except queue.Full:
+                    pass
+
+            gnss.listen(_gnss_callback)
+            self.sensors.append(gnss)
 
 
     def _setup_forward_camera(self) -> None:
@@ -187,16 +231,32 @@ class Controlled_Agents(Agent):
 
             array = np.frombuffer(image.raw_data, dtype=np.uint8)
             array = array.reshape((image.height, image.width, 4))
-            rgb = array[:, :, :3]  # drop alpha
-
+            bgr = array[:, :, :3]
+            rgb = bgr[:, :, ::-1]       # BGR → RGB
             self._last_forward_rgb = rgb
+
             try:
                 self._forward_cam_queue.put_nowait((image.frame, rgb))
             except queue.Full:
                 pass
 
         camera.listen(_forward_cam_callback)
+        sensor_count = len(self.sensors)
+        print(f'Now there are {sensor_count} sensors ')
         self.sensors.append(camera)
+
+    def get_route_geo(self):
+        """
+        Return the route as a list of (lat, lon, alt) tuples.
+        Empty list if no route was planned.
+        """
+        if not getattr(self, "route_geo", None):
+            return []
+        return [
+            (g.latitude, g.longitude, g.altitude)
+            for g in self.route_geo
+        ]
+
 
     def get_forward_latest(self) -> Optional[np.ndarray]:
         """
@@ -213,6 +273,11 @@ class Controlled_Agents(Agent):
         """Return latest depth as (H, W) float32 meters or None."""
         return self._last_depth
 
+    def get_gnss_latest(self):
+        """
+        Returns (lat, lon, alt) of the last GNSS measurement, or None if not ready.
+        """
+        return self._last_gnss
 
     def _setup_seg_depth_cameras(self) -> None:
         """

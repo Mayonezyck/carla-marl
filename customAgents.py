@@ -94,8 +94,8 @@ class Agent:
                 self.destination = self._pick_nearby_destination(
                     world=self.world,
                     start_location=self.starting_point,
-                    min_distance=250.0,   # tweak as you like
-                    step=2.0,
+                    min_distance=50.0,   # tweak as you like
+                    step=5.0,
                 )
                 dest = self.destination
                 print(dest)

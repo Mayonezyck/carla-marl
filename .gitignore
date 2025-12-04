@@ -15,6 +15,9 @@ output_*
 cmpe_run_*/
 cmpe_ppo_run_*/
 
+# models 
+*.pth
+
 # Distribution / packaging
 .Python
 build/
