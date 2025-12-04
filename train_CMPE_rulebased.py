@@ -30,13 +30,17 @@ STATE_NORMAL = "normal"
 STATE_APPROACH_GOAL = "approach_goal"
 STATE_STOP = "stop"
 
-TARGET_SPEED_NORMAL = 10.0   # m/s ~ 36 km/h
-TARGET_SPEED_APPROACH = 5.0  # m/s ~ 18 km/h
-STOP_DISTANCE_M = 3.0        # within 3m of goal -> stop
+TARGET_SPEED_NORMAL = 4.0   # m/s ~ 36 km/h
+TARGET_SPEED_APPROACH = 3.0  # m/s ~ 18 km/h
+STOP_DISTANCE_M = 5        # within 3m of goal -> stop
 APPROACH_DISTANCE_M = 20.0   # within 20m of goal -> approach_goal
 
+LOOKAHEAD_STEPS = 1    # how far ahead along the route to aim
+K_STEER_PP      = 1.0  # gain for pure-pursuit steering (tune 0.8–1.5)
+WHEELBASE_M     = 2.8  # approximate vehicle wheelbase for curvature calc
 
-WP_REACHED_DIST = 3.0        # how close we must get to a route point to "reach" it
+
+WP_REACHED_DIST = 3       # how close we must get to a route point to "reach" it
 
 
 current_wp_idx = -1
@@ -381,8 +385,29 @@ def draw_visualizer(
         f"throttle: {throttle:.2f}",
         f"brake: {brake:.2f}",
         "",
+        # GNSS-local debug
+        f"ego_rel_xy: ({rel_x:.1f}, {rel_y:.1f}) m",
+        f"wp_idx: {current_wp_idx}",
+    ]
+
+    # If we have a valid current waypoint, show its position and distance
+    if 0 <= current_wp_idx < len(route_points):
+        wx, wy = route_points[current_wp_idx]
+        dx_wp = wx - rel_x
+        dy_wp = wy - rel_y
+        dist_wp = math.hypot(dx_wp, dy_wp)
+        lines.append(
+            f"wp_rel_xy: ({wx:.1f}, {wy:.1f}) m"
+        )
+        lines.append(
+            f"wp_offset_from_ego: (dx={dx_wp:.1f}, dy={dy_wp:.1f}) m, dist={dist_wp:.1f} m"
+        )
+
+    lines += [
+        "",
         "Sensors:",
     ] + [f" - {name}" for name in sensor_names]
+
 
     x = text_area_rect.left
     y = text_area_rect.top
@@ -431,7 +456,6 @@ def main():
         vehicle = controlled_agent.vehicle
 
         print(f"Spawned Controlled_Agents vehicle: {vehicle.id}")
-        vehicle.set_autopilot(False)
 
         # For cleanup later
         actors.append(controlled_agent)
@@ -582,48 +606,86 @@ def main():
             #     current_wp_idx = -1
             #     final_wp_idx = -1
 
-            # --- Lateral control: follow route using heading error ---
-            if current_wp_idx >= 0:
-                wx, wy = route_points_rel[current_wp_idx]
-                dx_wp = wx - rel_x
-                dy_wp = wy - rel_y
+            # # --- Lateral control: follow route using heading error ---
+            # if current_wp_idx >= 0:
+            #     wx, wy = route_points_rel[current_wp_idx]
+            #     dx_wp = wx - rel_x
+            #     dy_wp = wy - rel_y
 
-                # 1) Check if this waypoint is mostly behind the ego
-                # ego heading vector from ego_yaw
-                hx = math.cos(ego_yaw)
-                hy = math.sin(ego_yaw)
-                dot = dx_wp * hx + dy_wp * hy  # projection along heading
+            #     # 1) Check if this waypoint is mostly behind the ego
+            #     # ego heading vector from ego_yaw
+            #     hx = math.cos(ego_yaw)
+            #     hy = math.sin(ego_yaw)
+            #     dot = dx_wp * hx + dy_wp * hy  # projection along heading
 
-                # # if dot < 0, waypoint lies behind the car in heading frame
-                # if dot < 0.0 and current_wp_idx < len(route_points_rel) - 1:
-                #     # skip this waypoint once and aim for the next one instead
-                #     current_wp_idx += 1
-                #     wx, wy = route_points_rel[current_wp_idx]
-                #     dx_wp = wx - rel_x
-                #     dy_wp = wy - rel_y
-                #     # (You could recompute dot here again if you want.)
+            #     # # if dot < 0, waypoint lies behind the car in heading frame
+            #     # if dot < 0.0 and current_wp_idx < len(route_points_rel) - 1:
+            #     #     # skip this waypoint once and aim for the next one instead
+            #     #     current_wp_idx += 1
+            #     #     wx, wy = route_points_rel[current_wp_idx]
+            #     #     dx_wp = wx - rel_x
+            #     #     dy_wp = wy - rel_y
+            #     #     # (You could recompute dot here again if you want.)
 
-                desired_yaw = math.atan2(dy_wp, dx_wp)
-                # shortest signed angle difference
-                yaw_error = (desired_yaw - ego_yaw + math.pi) % (2.0 * math.pi) - math.pi
+            #     desired_yaw = math.atan2(dy_wp, dx_wp)
+            #     # shortest signed angle difference
+            #     yaw_error = (desired_yaw - ego_yaw + math.pi) % (2.0 * math.pi) - math.pi
 
-                # if abs(yaw_error) > 0.7:  # ~40 degrees, tweak as you like
-                #     print(
-                #         f"[DEBUG yaw] step={step}, wp_idx={current_wp_idx}, "
-                #         f"dx_wp={dx_wp:.1f}, dy_wp={dy_wp:.1f}, "
-                #         f"ego_yaw={ego_yaw:.2f}, des_yaw={desired_yaw:.2f}, "
-                #         f"yaw_err={yaw_error:.2f}"
-                #     )
+            #     # if abs(yaw_error) > 0.7:  # ~40 degrees, tweak as you like
+            #     #     print(
+            #     #         f"[DEBUG yaw] step={step}, wp_idx={current_wp_idx}, "
+            #     #         f"dx_wp={dx_wp:.1f}, dy_wp={dy_wp:.1f}, "
+            #     #         f"ego_yaw={ego_yaw:.2f}, des_yaw={desired_yaw:.2f}, "
+            #     #         f"yaw_err={yaw_error:.2f}"
+            #     #     )
 
-                # small dead-zone to avoid jitter
-                if abs(yaw_error) < 0.02:  # ~1.1 degrees
-                    yaw_error = 0.0
+            #     # small dead-zone to avoid jitter
+            #     if abs(yaw_error) < 0.02:  # ~1.1 degrees
+            #         yaw_error = 0.0
 
-                K_STEER = 0.3  # slightly softer
-                steer = max(-1.0, min(1.0, K_STEER * yaw_error))
+            #     K_STEER = 0.3  # slightly softer
+            #     steer = max(-1.0, min(1.0, K_STEER * yaw_error))
+            # else:
+            #     # fallback: just go straight for now
+            #     steer = 0.0
+
+            # --- Lateral control: pure-pursuit style on route ---
+            if current_wp_idx >= 0 and route_points_rel:
+                # 1) Choose a lookahead waypoint along the route
+                lookahead_idx = min(current_wp_idx + LOOKAHEAD_STEPS, final_wp_idx)
+                wx, wy = route_points_rel[lookahead_idx]
+
+                # 2) Vector from ego to waypoint in world frame
+                dx = wx - rel_x
+                dy = wy - rel_y
+
+                # 3) Transform into ego frame (x forward, y left)
+                #    Rotate by -ego_yaw
+                cos_y = math.cos(-ego_yaw)
+                sin_y = math.sin(-ego_yaw)
+                x_rel = dx * cos_y - dy * sin_y
+                y_rel = dx * sin_y + dy * cos_y
+
+                # Guard: if the point is slightly behind us due to noise,
+                # clamp x_rel to small positive so we don't flip
+                if x_rel < 0.5:
+                    x_rel = 0.5
+
+                # 4) Compute pure-pursuit curvature
+                Ld = max(1.0, math.hypot(x_rel, y_rel))   # lookahead distance
+                curvature = 2.0 * y_rel / (Ld * Ld)      # standard PP formula
+
+                # 5) Map curvature to steering in [-1, 1]
+                steer_cmd = curvature * WHEELBASE_M * K_STEER_PP
+                steer = max(-1.0, min(1.0, -steer_cmd))
+
+                # (Optional) tiny dead-zone to avoid steering noise on straight road
+                if abs(steer) < 0.01:
+                    steer = 0.0
             else:
-                # fallback: just go straight for now
+                # fallback: just go straight
                 steer = 0.0
+
 
 
             # --- Longitudinal control from state machine ---

@@ -88,18 +88,27 @@ class Agent:
                 )
 
             # Starting point is the (possibly adjusted) spawn location
+                        # Starting point is the (possibly adjusted) spawn location
             self.starting_point = spawn_point.location
 
             if self.role_prefix == "controlled_agent":
                 start = self.starting_point
-                self.destination = self._pick_nearby_destination(
-                    world=self.world,
-                    start_location=self.starting_point,
-                    min_distance=50.0,   # tweak as you like
-                    step=5.0,
+
+                # 🔥 Build a dense forward route from the spawn, so:
+                # - waypoints are ~`step` meters apart
+                # - first waypoint is guaranteed to be in front of the vehicle
+                route_wps, dest_loc = self._build_forward_route(
+                    start_location=start,
+                    min_distance=250.0,   # tweak as you like
+                    step=2.0,
                 )
+
+                # Store for later use (e.g. to convert to GNSS in Controlled_Agents)
+                self._route_waypoints = route_wps
+                self.destination = dest_loc
                 dest = self.destination
                 print(dest)
+
                 bp.set_attribute(
                     "role_name",
                     f"{self.role_prefix}_{self.index}"
@@ -224,6 +233,65 @@ class Agent:
             return random.choice(driving_wps).transform.location
         else:
             return random.choice(driving_wps).transform.location
+        
+    def _build_forward_route(
+        self,
+        start_location: carla.Location,
+        min_distance: float = 250.0,
+        step: float = 2.0,
+        max_steps: int = 1000,
+    ):
+        """
+        Build a dense route by walking forward along the driving lane from
+        start_location using waypoint.next(step).
+
+        - First waypoint is guaranteed to be IN FRONT of the car (we start from
+          the lane waypoint at start_location and take next(step)).
+        - Waypoints are spaced ~`step` meters apart, so they are dense.
+        - We stop when we reach at least `min_distance` or run out of road.
+
+        Returns:
+            route_wps: [wp_1, wp_2, ..., wp_N]   (wp_1 is the first 'next' waypoint)
+            dest_loc:  last waypoint's location (fallback to start if empty)
+        """
+        carla_map = self.world.get_map()
+
+        # Closest driving waypoint at the start
+        wp0 = carla_map.get_waypoint(
+            start_location,
+            project_to_road=True,
+            lane_type=carla.LaneType.Driving,
+        )
+        if wp0 is None:
+            raise RuntimeError("[Agent] Could not find driving waypoint at start_location.")
+
+        route_wps: List[carla.Waypoint] = []
+        current_wp = wp0
+        travelled = 0.0  # approximate along-lane distance
+
+        for _ in range(max_steps):
+            next_wps = current_wp.next(step)
+            if not next_wps:
+                # end of lane
+                break
+
+            # If there are multiple branches, choose one (you can make this smarter later)
+            current_wp = random.choice(next_wps)
+
+            route_wps.append(current_wp)
+            travelled += step
+
+            if travelled >= min_distance:
+                break
+
+        if route_wps:
+            dest_loc = route_wps[-1].transform.location
+        else:
+            # Fallback: no forward waypoints (tiny lane, etc.)
+            dest_loc = wp0.transform.location
+
+        return route_wps, dest_loc
+
 
     def _pick_nearby_destination(
         self,
@@ -345,5 +413,6 @@ class Agent:
             try:
                 self.vehicle.destroy()
             except Exception:
+                print('Some problem destroying vehicle')
                 pass
             self.vehicle = None
