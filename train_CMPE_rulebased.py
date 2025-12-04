@@ -41,7 +41,7 @@ OBST_SLOW_DIST = 12.0   # <= this -> slow
 OBST_CLEAR_DIST = 25.0  # beyond this -> totally clear
 
 
-TARGET_SPEED_NORMAL = 4.0   # m/s ~ 36 km/h
+TARGET_SPEED_NORMAL = 5.0   # m/s ~ 36 km/h
 TARGET_SPEED_APPROACH = 3.0  # m/s ~ 18 km/h
 STOP_DISTANCE_M = 5        # within 3m of goal -> stop
 APPROACH_DISTANCE_M = 20.0   # within 20m of goal -> approach_goal
@@ -53,11 +53,14 @@ WHEELBASE_M     = 2.8  # approximate vehicle wheelbase for curvature calc
 # Segmentation classes we care about
 PEDESTRIAN_CLASS = 4
 VEHICLE_CLASS    = 10
+
+ROADLINE_CLASS = 6
+TRAFFIC_SIGN_CLASS = 12
 OBSTACLE_CLASSES = {PEDESTRIAN_CLASS, VEHICLE_CLASS}
 
 # ROI for "in our way" region in image coordinates (for seg_ids with shape (H, W))
 # Tune these based on your camera FOV / mounting:
-ROI_Y_START = int(H * 0.5)   # start halfway down (ignore far away stuff)
+ROI_Y_START = int(H * 0.4)   # start halfway down (ignore far away stuff)
 ROI_Y_END   = H              # bottom of image (near to car)
 ROI_X_START = int(W * 0.35)  # narrow-ish central band
 ROI_X_END   = int(W * 0.65)
@@ -692,6 +695,8 @@ def compute_min_obstacle_depth(seg_ids: np.ndarray,
 
 
 
+
+
 def main():
     client = carla.Client("localhost", 2000)
     client.set_timeout(10.0)
@@ -736,8 +741,8 @@ def main():
         npc_actors = spawn_vehicles_and_walkers(
             client,
             world,
-            num_vehicles=20,
-            num_walkers=40,
+            num_vehicles=80,
+            num_walkers=80,
         )
         actors.extend(npc_actors)
         # ---- GNSS-based frame: use first GNSS fix as origin ----
