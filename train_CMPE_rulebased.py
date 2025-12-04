@@ -19,7 +19,7 @@ from config import ConfigLoader
 
 from rulebased_policy import RuleBasedPolicy
 from unet_depth_vis import make_unet_model, H, W, MAX_DEPTH_METERS  # make sure unet_depth_vis exposes these
-from unet_seg_vis import make_seg_unet_model, predict_segmentation, numpy_to_pygame_surface as seg_np2surf
+from unet_seg_vis import make_seg_unet_model, predict_segmentation, predict_segmentation_ids, numpy_to_pygame_surface as seg_np2surf
 
 
 #"magma", "inferno", "plasma", "viridis"
@@ -30,6 +30,17 @@ STATE_NORMAL = "normal"
 STATE_APPROACH_GOAL = "approach_goal"
 STATE_STOP = "stop"
 
+# --- Obstacle state machine constants ---
+OBST_CLEAR = "clear"
+OBST_SLOW  = "slow"
+OBST_STOP  = "stop_for_obstacle"
+
+# Obstacle distance thresholds (meters) for behavior
+OBST_STOP_DIST = 6.0    # <= this -> full stop
+OBST_SLOW_DIST = 12.0   # <= this -> slow
+OBST_CLEAR_DIST = 25.0  # beyond this -> totally clear
+
+
 TARGET_SPEED_NORMAL = 4.0   # m/s ~ 36 km/h
 TARGET_SPEED_APPROACH = 3.0  # m/s ~ 18 km/h
 STOP_DISTANCE_M = 5        # within 3m of goal -> stop
@@ -39,6 +50,17 @@ LOOKAHEAD_STEPS = 1    # how far ahead along the route to aim
 K_STEER_PP      = 1.0  # gain for pure-pursuit steering (tune 0.8–1.5)
 WHEELBASE_M     = 2.8  # approximate vehicle wheelbase for curvature calc
 
+# Segmentation classes we care about
+PEDESTRIAN_CLASS = 4
+VEHICLE_CLASS    = 10
+OBSTACLE_CLASSES = {PEDESTRIAN_CLASS, VEHICLE_CLASS}
+
+# ROI for "in our way" region in image coordinates (for seg_ids with shape (H, W))
+# Tune these based on your camera FOV / mounting:
+ROI_Y_START = int(H * 0.5)   # start halfway down (ignore far away stuff)
+ROI_Y_END   = H              # bottom of image (near to car)
+ROI_X_START = int(W * 0.35)  # narrow-ish central band
+ROI_X_END   = int(W * 0.65)
 
 WP_REACHED_DIST = 3       # how close we must get to a route point to "reach" it
 
@@ -158,6 +180,26 @@ def update_ego_state(current_state, dist_to_goal, speed) -> str:
         return STATE_NORMAL
 
 
+def update_obstacle_state_from_depth(current_state: str, min_depth) -> str:
+    """
+    Decide obstacle state from the nearest obstacle depth (in meters).
+
+    min_depth:
+      None -> no obstacle
+      small -> very close
+    """
+    if min_depth is None:
+        return OBST_CLEAR
+
+    if min_depth <= OBST_STOP_DIST:
+        return OBST_STOP
+    elif min_depth <= OBST_SLOW_DIST:
+        return OBST_SLOW
+    else:
+        return OBST_CLEAR
+
+
+
 def init_pygame(width=960, height=540):
     pygame.init()
     screen = pygame.display.set_mode((width, height))
@@ -209,12 +251,14 @@ def numpy_to_pygame_surface(arr: np.ndarray) -> pygame.Surface:
     return pygame.surfarray.make_surface(np.transpose(arr, (1, 0, 2)))
 
 
-def predict_depth(model: nn.Module, rgb_np: np.ndarray) -> np.ndarray:
+def predict_depth(model: nn.Module, rgb_np: np.ndarray):
     """
     Run the UNet on a single RGB frame.
 
     rgb_np: (H, W, 3) uint8
-    returns: (H, W, 3) uint8 grayscale depth image
+    returns:
+      depth_rgb : (H, W, 3) uint8 colored depth for visualization
+      depth_map : (H, W) float32 in meters
     """
     device = next(model.parameters()).device
 
@@ -224,19 +268,119 @@ def predict_depth(model: nn.Module, rgb_np: np.ndarray) -> np.ndarray:
     with torch.no_grad():
         pred = model(img_tensor)      # (1, 1, H, W)
         pred = torch.clamp(pred, 0.0, MAX_DEPTH_METERS)
-        depth = pred.squeeze(0).squeeze(0).cpu().numpy()  # (H, W)
+        depth = pred.squeeze(0).squeeze(0).cpu().numpy().astype(np.float32)  # (H, W)
 
     depth_norm = np.clip(depth / MAX_DEPTH_METERS, 0.0, 1.0)
 
-
     cmap = cm.get_cmap(COLOR_MAP_FOR_DEPTH)
-
-    # cmap returns RGBA in [0,1], shape (H, W, 4)
-    depth_color = cmap(depth_norm)
-
-    # Drop alpha, convert to uint8 RGB
+    depth_color = cmap(depth_norm)                    # (H, W, 4)
     depth_rgb = (depth_color[..., :3] * 255.0).astype(np.uint8)  # (H, W, 3)
-    return depth_rgb
+
+    return depth_rgb, depth     # <--- new: also return metric depth
+
+
+def spawn_vehicles_and_walkers(
+    client: carla.Client,
+    world: carla.World,
+    num_vehicles: int = 15,
+    num_walkers: int = 30,
+) -> list:
+    """
+    Spawn some background traffic:
+      - num_vehicles vehicles with autopilot
+      - num_walkers pedestrians with AI controllers
+
+    Returns a flat list of actors (vehicles + walkers + walker_controllers)
+    so the caller can destroy them on shutdown.
+    """
+    spawned_actors = []
+
+    blueprint_library = world.get_blueprint_library()
+    tm = client.get_trafficmanager()  # use default TM port
+    tm.set_synchronous_mode(True)
+
+    # ------------- Vehicles -------------
+    spawn_points = world.get_map().get_spawn_points()
+    random.shuffle(spawn_points)
+
+    vehicle_blueprints = blueprint_library.filter("vehicle.*")
+
+    vehicles_to_spawn = min(num_vehicles, len(spawn_points))
+    for i in range(vehicles_to_spawn):
+        bp = random.choice(vehicle_blueprints)
+
+        # Avoid bikes if you want "proper" vehicles only:
+        if bp.has_attribute("number_of_wheels"):
+            wheels = int(bp.get_attribute("number_of_wheels"))
+            if wheels < 4:
+                continue
+
+        # safer: make sure we have a spawn point
+        transform = spawn_points[i]
+        try:
+            veh = world.try_spawn_actor(bp, transform)
+            if veh is not None:
+                veh.set_autopilot(True, tm.get_port())
+                spawned_actors.append(veh)
+        except RuntimeError:
+            continue
+
+    # ------------- Walkers -------------
+    walker_blueprints = blueprint_library.filter("walker.pedestrian.*")
+    walker_actors = []
+    walker_controllers = []
+
+    for i in range(num_walkers):
+        # Pick a random navmesh position
+        loc = world.get_random_location_from_navigation()
+        if loc is None:
+            continue
+
+        walker_bp = random.choice(walker_blueprints)
+        # optional: randomize speed if attribute exists
+        if walker_bp.has_attribute("speed"):
+            speed = random.uniform(
+                float(walker_bp.get_attribute("speed").recommended_values[1]),
+                float(walker_bp.get_attribute("speed").recommended_values[-1]),
+            )
+            walker_bp.set_attribute("speed", f"{speed:.2f}")
+
+        transform = carla.Transform(loc, carla.Rotation(0, random.uniform(-180, 180), 0))
+        try:
+            walker = world.try_spawn_actor(walker_bp, transform)
+        except RuntimeError:
+            walker = None
+
+        if walker is None:
+            continue
+
+        walker_actors.append(walker)
+        spawned_actors.append(walker)
+
+    # Now spawn controllers for each walker
+    controller_bp = blueprint_library.find("controller.ai.walker")
+    for walker in walker_actors:
+        try:
+            controller = world.spawn_actor(controller_bp, carla.Transform(), attach_to=walker)
+        except RuntimeError:
+            controller = None
+
+        if controller is None:
+            continue
+
+        walker_controllers.append(controller)
+        spawned_actors.append(controller)
+
+    # Start walker controllers and give them random destinations
+    world.tick()
+    for controller in walker_controllers:
+        controller.start()
+        controller.set_max_speed(1.5 + random.random())  # m/s
+        dest = world.get_random_location_from_navigation()
+        if dest is not None:
+            controller.go_to_location(dest)
+
+    return spawned_actors
 
 
 
@@ -246,8 +390,8 @@ def draw_visualizer(
     rgb_surface: pygame.Surface,
     depth_surface: pygame.Surface,
     seg_surface: pygame.Surface,
-    path_points,          # list[(rel_x, rel_y)] from spawn
-    route_points,         # list[(rel_x, rel_y)] from spawn
+    path_points,
+    route_points,
     rel_x,
     rel_y,
     steer,
@@ -259,7 +403,10 @@ def draw_visualizer(
     current_wp_idx: int,
     final_wp_idx: int,
     ego_state: str,
+    obstacle_state: str,
+    min_obstacle_depth: float,
 ):
+
     """
     Layout:
       Top row (3 columns): RGB | Depth | Seg
@@ -280,24 +427,55 @@ def draw_visualizer(
     rect_depth = pygame.Rect(1 * col_w, 0, col_w, top_h)
     rect_seg   = pygame.Rect(2 * col_w, 0, col_w, top_h)
 
-    def blit_scaled(surface, rect):
+    def blit_scaled_with_roi(surface, rect, draw_roi=False):
+        """
+        Draws a surface scaled into rect.
+        If draw_roi is True, overlay the (ROI_X/Y_*) box in green,
+        assuming ROI_* are in original image coords.
+        """
         if surface is None:
             pygame.draw.rect(screen, (40, 40, 40), rect)
             return
-        w, h = surface.get_size()
-        scale = min(rect.width / w, rect.height / h)
-        new_w = int(w * scale)
-        new_h = int(h * scale)
-        surf_scaled = pygame.transform.smoothscale(surface, (new_w, new_h))
-        pos = (
-            rect.left + (rect.width - new_w) // 2,
-            rect.top + (rect.height - new_h) // 2,
-        )
-        screen.blit(surf_scaled, pos)
 
-    blit_scaled(rgb_surface, rect_rgb)
-    blit_scaled(depth_surface, rect_depth)
-    blit_scaled(seg_surface, rect_seg)
+        # Original image size
+        img_w, img_h = surface.get_size()
+
+        # Scale to fit inside rect while keeping aspect ratio
+        scale = min(rect.width / img_w, rect.height / img_h)
+        new_w = int(img_w * scale)
+        new_h = int(img_h * scale)
+
+        surf_scaled = pygame.transform.smoothscale(surface, (new_w, new_h))
+
+        # Center it inside the rect
+        pos_x = rect.left + (rect.width - new_w) // 2
+        pos_y = rect.top + (rect.height - new_h) // 2
+
+        screen.blit(surf_scaled, (pos_x, pos_y))
+
+        if draw_roi:
+            # ROI is defined in original image coordinates (W, H)
+            # Map to screen coordinates using same scale + offset
+            roi_x = int(ROI_X_START * scale)
+            roi_y = int(ROI_Y_START * scale)
+            roi_w = int((ROI_X_END - ROI_X_START) * scale)
+            roi_h = int((ROI_Y_END - ROI_Y_START) * scale)
+
+            roi_rect = pygame.Rect(
+                pos_x + roi_x,
+                pos_y + roi_y,
+                roi_w,
+                roi_h,
+            )
+            pygame.draw.rect(screen, (0, 255, 0), roi_rect, width=2)
+
+    # Draw RGB with ROI box overlay
+    blit_scaled_with_roi(rgb_surface, rect_rgb, draw_roi=True)
+
+    # Depth & seg: no ROI box (or set True too if you want)
+    blit_scaled_with_roi(depth_surface, rect_depth, draw_roi=False)
+    blit_scaled_with_roi(seg_surface, rect_seg, draw_roi=False)
+
 
     # --- Bottom row: minimap + text ---
     bottom_top = top_h
@@ -380,7 +558,8 @@ def draw_visualizer(
     lines = [
         f"step: {step}",
         f"speed: {speed:.2f} m/s",
-        f"state: {ego_state}",
+        f"route_state: {ego_state}",
+        f"obstacle_state: {obstacle_state}",
         f"steer: {steer:.2f}",
         f"throttle: {throttle:.2f}",
         f"brake: {brake:.2f}",
@@ -389,6 +568,10 @@ def draw_visualizer(
         f"ego_rel_xy: ({rel_x:.1f}, {rel_y:.1f}) m",
         f"wp_idx: {current_wp_idx}",
     ]
+    if min_obstacle_depth is None:
+        lines.append("min_obs_depth: None")
+    else:
+        lines.append(f"min_obs_depth: {min_obstacle_depth:.1f} m")
 
     # If we have a valid current waypoint, show its position and distance
     if 0 <= current_wp_idx < len(route_points):
@@ -417,6 +600,96 @@ def draw_visualizer(
         y += 22
 
     pygame.display.flip()
+
+def compute_obstacle_proximity(seg_ids: np.ndarray) -> float:
+    """
+    Look in a central-bottom ROI of the segmentation map for pedestrians/vehicles.
+
+    Returns a proximity score in [0, 1]:
+      0.0 -> no obstacle in ROI
+      1.0 -> obstacle at the very bottom (very close)
+    """
+    if seg_ids is None:
+        return 0.0
+
+    h, w = seg_ids.shape
+    y0 = max(0, min(ROI_Y_START, h))
+    y1 = max(0, min(ROI_Y_END,   h))
+    x0 = max(0, min(ROI_X_START, w))
+    x1 = max(0, min(ROI_X_END,   w))
+
+    if y1 <= y0 or x1 <= x0:
+        return 0.0
+
+    roi = seg_ids[y0:y1, x0:x1]   # (roi_h, roi_w)
+
+    # mask for "danger" pixels: pedestrians or vehicles
+    mask = np.isin(roi, list(OBSTACLE_CLASSES))
+    if not mask.any():
+        return 0.0
+
+    # We approximate "closer" by how low the obstacle pixels go in the ROI
+    ys, xs = np.where(mask)
+    max_y = ys.max()                      # 0 = top of ROI, roi_h-1 = bottom
+    roi_h = roi.shape[0]
+    proximity = max_y / max(1, roi_h-1)   # ~0 top, ~1 bottom
+
+    return float(np.clip(proximity, 0.0, 1.0))
+
+def compute_min_obstacle_depth(seg_ids: np.ndarray,
+                               depth_map: np.ndarray,
+                               use_roi: bool = True):
+    """
+    Use segmentation + depth to estimate the nearest obstacle distance.
+
+    seg_ids   : (H, W) int class indices
+    depth_map : (H, W) float32 in meters, aligned with seg_ids
+
+    If use_roi:
+      only consider a central-bottom ROI (same spirit as compute_obstacle_proximity),
+      so we react mainly to obstacles actually in our lane & near in front.
+
+    Returns:
+      min_depth (float, meters) of any pedestrian/vehicle pixel in ROI,
+      or None if no such pixels.
+    """
+    if seg_ids is None or depth_map is None:
+        return None
+
+    if seg_ids.shape != depth_map.shape:
+        raise ValueError(f"seg_ids shape {seg_ids.shape} != depth_map shape {depth_map.shape}")
+
+    if use_roi:
+        h, w = seg_ids.shape
+        y0 = max(0, min(ROI_Y_START, h))
+        y1 = max(0, min(ROI_Y_END,   h))
+        x0 = max(0, min(ROI_X_START, w))
+        x1 = max(0, min(ROI_X_END,   w))
+
+        if y1 <= y0 or x1 <= x0:
+            return None  # bad ROI => no info
+
+        seg_roi   = seg_ids[y0:y1, x0:x1]
+        depth_roi = depth_map[y0:y1, x0:x1]
+    else:
+        seg_roi   = seg_ids
+        depth_roi = depth_map
+
+    # mask of all ped/vehicle pixels in ROI
+    mask = np.isin(seg_roi, list(OBSTACLE_CLASSES))
+    if not mask.any():
+        return None
+
+    obstacle_depths = depth_roi[mask]
+    obstacle_depths = obstacle_depths[np.isfinite(obstacle_depths)]
+    obstacle_depths = obstacle_depths[obstacle_depths > 0.1]  # ignore junk very close to 0
+
+    if obstacle_depths.size == 0:
+        return None
+
+    return float(obstacle_depths.min())
+
+
 
 
 def main():
@@ -459,10 +732,17 @@ def main():
 
         # For cleanup later
         actors.append(controlled_agent)
-
+        # Spawn background NPC traffic (cars + pedestrians)
+        npc_actors = spawn_vehicles_and_walkers(
+            client,
+            world,
+            num_vehicles=20,
+            num_walkers=40,
+        )
+        actors.extend(npc_actors)
         # ---- GNSS-based frame: use first GNSS fix as origin ----
         gnss_origin = None  # (lat0, lon0)
-        print("Waiting for first GNSS fix...")
+        print("Waiting for first GNSS fix...")  
 
         # Tick until we get a GNSS reading
         while gnss_origin is None:
@@ -496,6 +776,9 @@ def main():
         ego_yaw = 0.0
         step = 0
         running = True
+
+        obstacle_state = OBST_CLEAR
+        min_obstacle_depth = None
 
         # Prime the world once so sensors start producing data
         world.tick()
@@ -531,15 +814,23 @@ def main():
                     import cv2
                     rgb_np = cv2.resize(rgb_np, (W, H), interpolation=cv2.INTER_NEAREST)
 
-                depth_rgb = predict_depth(depth_unet, rgb_np)
+                depth_rgb, depth_map = predict_depth(depth_unet, rgb_np)
                 seg_rgb = predict_segmentation(seg_unet, rgb_np)
+                seg_ids = predict_segmentation_ids(seg_unet, rgb_np)  # (H, W) int32 or int64
 
                 # Convert to pygame surfaces
                 latest_rgb_surface = numpy_to_pygame_surface(rgb_np)
                 latest_depth_surface = numpy_to_pygame_surface(depth_rgb)
                 latest_seg_surface = seg_np2surf(seg_rgb)
 
+                # 🔎 nearest obstacle distance (meters)
+                min_obstacle_depth = compute_min_obstacle_depth(seg_ids, depth_map)
 
+                # update obstacle state using distance
+                obstacle_state = update_obstacle_state_from_depth(
+                    obstacle_state,
+                    min_obstacle_depth,
+                )
             # ---- Ego position from GNSS only ----
             gnss = controlled_agent.get_gnss_latest()
             if gnss is not None:
@@ -650,7 +941,12 @@ def main():
             #     steer = 0.0
 
             # --- Lateral control: pure-pursuit style on route ---
-            if current_wp_idx >= 0 and route_points_rel:
+            if (ego_state == STATE_STOP) or (obstacle_state == OBST_STOP):
+                # If we intend to be stopped (goal or hard obstacle),
+                # don't keep spinning the steering wheel.
+                steer = 0.0
+
+            elif current_wp_idx >= 0 and route_points_rel:
                 # 1) Choose a lookahead waypoint along the route
                 lookahead_idx = min(current_wp_idx + LOOKAHEAD_STEPS, final_wp_idx)
                 wx, wy = route_points_rel[lookahead_idx]
@@ -673,7 +969,7 @@ def main():
 
                 # 4) Compute pure-pursuit curvature
                 Ld = max(1.0, math.hypot(x_rel, y_rel))   # lookahead distance
-                curvature = 2.0 * y_rel / (Ld * Ld)      # standard PP formula
+                curvature = 2.0 * y_rel / (Ld * Ld)       # standard PP formula
 
                 # 5) Map curvature to steering in [-1, 1]
                 steer_cmd = curvature * WHEELBASE_M * K_STEER_PP
@@ -687,16 +983,28 @@ def main():
                 steer = 0.0
 
 
-
-            # --- Longitudinal control from state machine ---
+            # --- Longitudinal control: route state -> desired route speed ---
             if ego_state == STATE_NORMAL:
-                target_speed = TARGET_SPEED_NORMAL
+                route_speed = TARGET_SPEED_NORMAL
             elif ego_state == STATE_APPROACH_GOAL:
-                target_speed = TARGET_SPEED_APPROACH
+                route_speed = TARGET_SPEED_APPROACH
             elif ego_state == STATE_STOP:
-                target_speed = 0.0
+                route_speed = 0.0
             else:
-                target_speed = TARGET_SPEED_NORMAL
+                route_speed = TARGET_SPEED_NORMAL
+
+            # --- Obstacle-driven speed cap ---
+            if obstacle_state == OBST_CLEAR:
+                obstacle_speed_cap = TARGET_SPEED_NORMAL
+            elif obstacle_state == OBST_SLOW:
+                obstacle_speed_cap = TARGET_SPEED_APPROACH
+            elif obstacle_state == OBST_STOP:
+                obstacle_speed_cap = 0.0
+            else:
+                obstacle_speed_cap = TARGET_SPEED_NORMAL
+
+            target_speed = min(route_speed, obstacle_speed_cap)
+
 
             speed_error = target_speed - speed
             throttle = 0.0
@@ -743,8 +1051,9 @@ def main():
                 current_wp_idx,
                 final_wp_idx,
                 ego_state,
+                obstacle_state,
+                min_obstacle_depth,
             )
-
 
             step += 1
 

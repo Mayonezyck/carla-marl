@@ -55,6 +55,22 @@ def numpy_to_pygame_surface(arr: np.ndarray) -> pygame.Surface:
     """
     return pygame.surfarray.make_surface(np.transpose(arr, (1, 0, 2)))
 
+def predict_segmentation_ids(model: nn.Module, rgb_np: np.ndarray) -> np.ndarray:
+    """
+    rgb_np: (H, W, 3) uint8 RGB
+    returns seg_ids: (H, W) int, each pixel is a class index.
+    """
+    device = next(model.parameters()).device
+    img = rgb_np.astype(np.float32) / 255.0
+    img_tensor = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        logits = model(img_tensor)           # (1, C, H, W)
+        seg_ids = torch.argmax(logits, dim=1).squeeze(0).cpu().numpy().astype(np.int32)
+
+    return seg_ids
+
+
 
 class SegUNetVis:
     """
