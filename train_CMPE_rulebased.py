@@ -46,17 +46,19 @@ TARGET_SPEED_APPROACH = TARGET_SPEED_NORMAL * 0.6  # m/s ~ 18 km/h
 STOP_DISTANCE_M = 5        # within 3m of goal -> stop
 APPROACH_DISTANCE_M = 20.0   # within 20m of goal -> approach_goal
 
-LOOKAHEAD_STEPS = 1    # how far ahead along the route to aim
-K_STEER_PP      = 1.0  # gain for pure-pursuit steering (tune 0.8–1.5)
+LOOKAHEAD_STEPS = 2    # how far ahead along the route to aim
+K_STEER_PP      = 1.5  # gain for pure-pursuit steering (tune 0.8–1.5)
 WHEELBASE_M     = 2.8  # approximate vehicle wheelbase for curvature calc
 
 # Segmentation classes we care about
-PEDESTRIAN_CLASS = 4
+PEDESTRIAN_CLASS = 26
+#PEDESTRIAN_CLASS_2 = 12
 VEHICLE_CLASS    = 14
+VEHICLE_CLASS_2 = 15
 
 ROADLINE_CLASS = 24
 TRAFFIC_SIGN_CLASS = 12
-OBSTACLE_CLASSES = {PEDESTRIAN_CLASS, VEHICLE_CLASS}
+OBSTACLE_CLASSES = {PEDESTRIAN_CLASS, VEHICLE_CLASS, VEHICLE_CLASS_2}
 
 # Stop-sign patch behavior (simple ROI-based detector)
 STOP_PATCH_MIN_FRACTION   = 0.35   # 80% of ROI pixels == ROADLINE_CLASS -> STOP
@@ -95,10 +97,7 @@ STOP_TRAP_X_LEFT_BOTTOM  = 0.32
 STOP_TRAP_X_RIGHT_BOTTOM = 0.68
 
 
-
-
-WP_REACHED_DIST = 3       # how close we must get to a route point to "reach" it
-
+WP_REACHED_DIST = 3.5       # how close we must get to a route point to "reach" it
 
 current_wp_idx = -1
 final_wp_idx = -1
@@ -452,8 +451,8 @@ def predict_depth(model: nn.Module, rgb_np: np.ndarray):
 def spawn_vehicles_and_walkers(
     client: carla.Client,
     world: carla.World,
-    num_vehicles: int = 15,
-    num_walkers: int = 30,
+    num_vehicles: int = 30,
+    num_walkers: int = 60,
 ) -> list:
     """
     Spawn some background traffic:

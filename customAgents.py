@@ -237,7 +237,7 @@ class Agent:
     def _build_forward_route(
         self,
         start_location: carla.Location,
-        min_distance: float = 250.0,
+        min_distance: float = 500.0,
         step: float = 2.0,
         max_steps: int = 1000,
     ):
