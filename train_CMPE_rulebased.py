@@ -42,8 +42,8 @@ OBST_SLOW_DIST = 12.0   # <= this -> slow
 OBST_CLEAR_DIST = 25.0  # beyond this -> totally clear
 
 
-TARGET_SPEED_NORMAL = 5.0   # m/s ~ 36 km/h
-TARGET_SPEED_APPROACH = 3.0  # m/s ~ 18 km/h
+TARGET_SPEED_NORMAL = 10.0   # m/s ~ 36 km/h
+TARGET_SPEED_APPROACH = TARGET_SPEED_NORMAL * 0.6  # m/s ~ 18 km/h
 STOP_DISTANCE_M = 5        # within 3m of goal -> stop
 APPROACH_DISTANCE_M = 20.0   # within 20m of goal -> approach_goal
 
@@ -60,18 +60,16 @@ TRAFFIC_SIGN_CLASS = 12
 OBSTACLE_CLASSES = {PEDESTRIAN_CLASS, VEHICLE_CLASS}
 
 
+# Stop-sign patch behavior (simple ROI-based detector)
+STOP_PATCH_MIN_FRACTION   = 0.35   # 80% of ROI pixels == ROADLINE_CLASS -> STOP
+STOP_SIGN_WAIT_STEPS      = 60    # how long to wait at STOP (60 * 0.05s = 3s)
+STOP_SIGN_COOLDOWN_STEPS  = 200   # steps before we can trigger another STOP
+
 # ROI for stop line detection (tune as needed)
 STOP_ROI_Y_START = int(H * 0.70)
 STOP_ROI_Y_END   = int(H * 0.80)
 STOP_ROI_X_START = int(W * 0.42)
 STOP_ROI_X_END   = int(W * 0.58)
-
-
-# Stop-sign patch behavior (simple ROI-based detector)
-STOP_PATCH_MIN_FRACTION   = 0.5   # 80% of ROI pixels == ROADLINE_CLASS -> STOP
-STOP_SIGN_WAIT_STEPS      = 60    # how long to wait at STOP (60 * 0.05s = 3s)
-STOP_SIGN_COOLDOWN_STEPS  = 200   # steps before we can trigger another STOP
-
 
 # ROI for "in our way" region in image coordinates (for seg_ids with shape (H, W))
 # Tune these based on your camera FOV / mounting:
@@ -79,6 +77,27 @@ ROI_Y_START = int(H * 0.4)   # start halfway down (ignore far away stuff)
 ROI_Y_END   = H              # bottom of image (near to car)
 ROI_X_START = int(W * 0.35)  # narrow-ish central band
 ROI_X_END   = int(W * 0.65)
+
+# --- Trapezoid definitions (normalized image fractions) ---
+
+# Obstacle ROI trapezoid (bottom-central in front of car)
+OBST_TRAP_Y_TOP          = 0.55
+OBST_TRAP_Y_BOTTOM       = 1.00
+OBST_TRAP_X_LEFT_TOP     = 0.47
+OBST_TRAP_X_RIGHT_TOP    = 0.53
+OBST_TRAP_X_LEFT_BOTTOM  = 0.25
+OBST_TRAP_X_RIGHT_BOTTOM = 0.75
+
+# Stop-sign ROI trapezoid (around road marking region)
+STOP_TRAP_Y_TOP          = 0.70
+STOP_TRAP_Y_BOTTOM       = 0.80
+STOP_TRAP_X_LEFT_TOP     = 0.36
+STOP_TRAP_X_RIGHT_TOP    = 0.64
+STOP_TRAP_X_LEFT_BOTTOM  = 0.32
+STOP_TRAP_X_RIGHT_BOTTOM = 0.68
+
+
+
 
 WP_REACHED_DIST = 3       # how close we must get to a route point to "reach" it
 
@@ -220,33 +239,113 @@ def update_obstacle_state_from_depth(current_state: str, min_depth) -> str:
     else:
         return OBST_CLEAR
 
+def build_trapezoid_pixel_coords(
+    h: int,
+    w: int,
+    y_top_frac: float,
+    y_bottom_frac: float,
+    x_left_top_frac: float,
+    x_right_top_frac: float,
+    x_left_bottom_frac: float,
+    x_right_bottom_frac: float,
+):
+    """Return (y0, y1, x_lt, x_rt, x_lb, x_rb) in pixel coordinates."""
+    y0 = int(h * y_top_frac)
+    y1 = int(h * y_bottom_frac)
+
+    x_lt = int(w * x_left_top_frac)
+    x_rt = int(w * x_right_top_frac)
+    x_lb = int(w * x_left_bottom_frac)
+    x_rb = int(w * x_right_bottom_frac)
+
+    return y0, y1, x_lt, x_rt, x_lb, x_rb
+
+
+def trapezoid_mask(h: int, w: int,
+                   y0: int, y1: int,
+                   x_lt: int, x_rt: int,
+                   x_lb: int, x_rb: int) -> np.ndarray:
+    """
+    Build a boolean mask for a trapezoid whose corners are:
+      (x_lt, y0), (x_rt, y0), (x_rb, y1), (x_lb, y1)
+    """
+    mask = np.zeros((h, w), dtype=bool)
+    if y1 <= y0:
+        return mask
+
+    for y in range(y0, y1):
+        t = (y - y0) / max(1, (y1 - y0 - 1))  # 0 at top, 1 at bottom
+
+        x_left  = int((1.0 - t) * x_lt + t * x_lb)
+        x_right = int((1.0 - t) * x_rt + t * x_rb)
+
+        x_left  = max(0, min(w, x_left))
+        x_right = max(0, min(w, x_right))
+
+        if x_right > x_left:
+            mask[y, x_left:x_right] = True
+
+    return mask
+
+
+# def detect_stop_patch(seg_ids: np.ndarray) -> bool:
+#     """
+#     Detect a STOP marking / stop line by checking if a fixed ROI is mostly ROADLINE_CLASS.
+
+#     Returns:
+#       True  -> ROI is heavily roadline (likely STOP marking/line)
+#       False -> otherwise
+#     """
+#     if seg_ids is None:
+#         return False
+
+#     h, w = seg_ids.shape
+#     y0 = max(0, min(STOP_ROI_Y_START, h))
+#     y1 = max(0, min(STOP_ROI_Y_END,   h))
+#     x0 = max(0, min(STOP_ROI_X_START, w))
+#     x1 = max(0, min(STOP_ROI_X_END,   w))
+
+#     if y1 <= y0 or x1 <= x0:
+#         return False
+
+#     roi = seg_ids[y0:y1, x0:x1]
+#     frac = np.mean(roi == ROADLINE_CLASS)
+#     #unique_classes = np.unique(roi)
+#     #print("Seg classes in frame:", unique_classes)
+#     # Debug if you like:
+#     print(f"[STOP patch] frac={frac:.2f}")
+
+#     return frac >= STOP_PATCH_MIN_FRACTION
+
+
 def detect_stop_patch(seg_ids: np.ndarray) -> bool:
     """
-    Detect a STOP marking / stop line by checking if a fixed ROI is mostly ROADLINE_CLASS.
-
-    Returns:
-      True  -> ROI is heavily roadline (likely STOP marking/line)
-      False -> otherwise
+    Detect a STOP marking / stop line by checking if a trapezoidal ROI
+    is mostly ROADLINE_CLASS.
     """
     if seg_ids is None:
         return False
 
     h, w = seg_ids.shape
-    y0 = max(0, min(STOP_ROI_Y_START, h))
-    y1 = max(0, min(STOP_ROI_Y_END,   h))
-    x0 = max(0, min(STOP_ROI_X_START, w))
-    x1 = max(0, min(STOP_ROI_X_END,   w))
 
-    if y1 <= y0 or x1 <= x0:
+    y0, y1, x_lt, x_rt, x_lb, x_rb = build_trapezoid_pixel_coords(
+        h, w,
+        STOP_TRAP_Y_TOP,
+        STOP_TRAP_Y_BOTTOM,
+        STOP_TRAP_X_LEFT_TOP,
+        STOP_TRAP_X_RIGHT_TOP,
+        STOP_TRAP_X_LEFT_BOTTOM,
+        STOP_TRAP_X_RIGHT_BOTTOM,
+    )
+
+    trap = trapezoid_mask(h, w, y0, y1, x_lt, x_rt, x_lb, x_rb)
+    if not trap.any():
         return False
 
-    roi = seg_ids[y0:y1, x0:x1]
-    frac = np.mean(roi == ROADLINE_CLASS)
-    #unique_classes = np.unique(roi)
-    #print("Seg classes in frame:", unique_classes)
-    # Debug if you like:
-    print(f"[STOP patch] frac={frac:.2f}")
+    roi_vals = seg_ids[trap]
+    frac = np.mean(roi_vals == ROADLINE_CLASS)
 
+    print(f"[STOP patch] frac={frac:.2f}")
     return frac >= STOP_PATCH_MIN_FRACTION
 
 
@@ -504,21 +603,50 @@ def draw_visualizer(
 
         screen.blit(surf_scaled, (pos_x, pos_y))
 
-        if draw_roi:
-            # ROI is defined in original image coordinates (W, H)
-            # Map to screen coordinates using same scale + offset
-            roi_x = int(ROI_X_START * scale)
-            roi_y = int(ROI_Y_START * scale)
-            roi_w = int((ROI_X_END - ROI_X_START) * scale)
-            roi_h = int((ROI_Y_END - ROI_Y_START) * scale)
+        # if draw_roi:
+        #     # ROI is defined in original image coordinates (W, H)
+        #     # Map to screen coordinates using same scale + offset
+        #     roi_x = int(ROI_X_START * scale)
+        #     roi_y = int(ROI_Y_START * scale)
+        #     roi_w = int((ROI_X_END - ROI_X_START) * scale)
+        #     roi_h = int((ROI_Y_END - ROI_Y_START) * scale)
 
-            roi_rect = pygame.Rect(
-                pos_x + roi_x,
-                pos_y + roi_y,
-                roi_w,
-                roi_h,
+        #     roi_rect = pygame.Rect(
+        #         pos_x + roi_x,
+        #         pos_y + roi_y,
+        #         roi_w,
+        #         roi_h,
+        #     )
+        #     pygame.draw.rect(screen, (0, 255, 0), roi_rect, width=2)
+        if draw_roi:
+            # Draw obstacle trapezoid (green) in image space then map to screen
+            img_h = img_h  # already have
+            img_w = img_w
+
+            y0, y1, x_lt, x_rt, x_lb, x_rb = build_trapezoid_pixel_coords(
+                img_h, img_w,
+                OBST_TRAP_Y_TOP,
+                OBST_TRAP_Y_BOTTOM,
+                OBST_TRAP_X_LEFT_TOP,
+                OBST_TRAP_X_RIGHT_TOP,
+                OBST_TRAP_X_LEFT_BOTTOM,
+                OBST_TRAP_X_RIGHT_BOTTOM,
             )
-            pygame.draw.rect(screen, (0, 255, 0), roi_rect, width=2)
+
+            pts_img = [
+                (x_lt, y0),
+                (x_rt, y0),
+                (x_rb, y1),
+                (x_lb, y1),
+            ]
+
+            pts_screen = [
+                (pos_x + int(x * scale), pos_y + int(y * scale))
+                for (x, y) in pts_img
+            ]
+
+            pygame.draw.polygon(screen, (0, 255, 0), pts_screen, width=2)
+
 
     # Draw RGB with ROI box overlay
     blit_scaled_with_roi(rgb_surface, rect_rgb, draw_roi=True)
@@ -528,6 +656,32 @@ def draw_visualizer(
     blit_scaled_with_roi(seg_surface, rect_seg, draw_roi=False)
 
     # --- Visualize STOP-sign ROI on the segmentation pane ---
+    # if seg_surface is not None:
+    #     img_w, img_h = seg_surface.get_size()
+    #     scale = min(rect_seg.width / img_w, rect_seg.height / img_h)
+    #     scaled_w = int(img_w * scale)
+    #     scaled_h = int(img_h * scale)
+
+    #     seg_x0 = rect_seg.left + (rect_seg.width  - scaled_w) // 2
+    #     seg_y0 = rect_seg.top  + (rect_seg.height - scaled_h) // 2
+
+    #     roi_x0_img = STOP_ROI_X_START
+    #     roi_x1_img = STOP_ROI_X_END
+    #     roi_y0_img = STOP_ROI_Y_START
+    #     roi_y1_img = STOP_ROI_Y_END
+
+    #     roi_x0 = seg_x0 + int(roi_x0_img * scale)
+    #     roi_x1 = seg_x0 + int(roi_x1_img * scale)
+    #     roi_y0 = seg_y0 + int(roi_y0_img * scale)
+    #     roi_y1 = seg_y0 + int(roi_y1_img * scale)
+
+    #     roi_rect = pygame.Rect(
+    #         roi_x0,
+    #         roi_y0,
+    #         roi_x1 - roi_x0,
+    #         roi_y1 - roi_y0,
+    #     )
+    #     pygame.draw.rect(screen, (255, 0, 0), roi_rect, width=2)
     if seg_surface is not None:
         img_w, img_h = seg_surface.get_size()
         scale = min(rect_seg.width / img_w, rect_seg.height / img_h)
@@ -537,23 +691,30 @@ def draw_visualizer(
         seg_x0 = rect_seg.left + (rect_seg.width  - scaled_w) // 2
         seg_y0 = rect_seg.top  + (rect_seg.height - scaled_h) // 2
 
-        roi_x0_img = STOP_ROI_X_START
-        roi_x1_img = STOP_ROI_X_END
-        roi_y0_img = STOP_ROI_Y_START
-        roi_y1_img = STOP_ROI_Y_END
-
-        roi_x0 = seg_x0 + int(roi_x0_img * scale)
-        roi_x1 = seg_x0 + int(roi_x1_img * scale)
-        roi_y0 = seg_y0 + int(roi_y0_img * scale)
-        roi_y1 = seg_y0 + int(roi_y1_img * scale)
-
-        roi_rect = pygame.Rect(
-            roi_x0,
-            roi_y0,
-            roi_x1 - roi_x0,
-            roi_y1 - roi_y0,
+        # Build stop-sign trapezoid in image coords
+        y0, y1, x_lt, x_rt, x_lb, x_rb = build_trapezoid_pixel_coords(
+            img_h, img_w,
+            STOP_TRAP_Y_TOP,
+            STOP_TRAP_Y_BOTTOM,
+            STOP_TRAP_X_LEFT_TOP,
+            STOP_TRAP_X_RIGHT_TOP,
+            STOP_TRAP_X_LEFT_BOTTOM,
+            STOP_TRAP_X_RIGHT_BOTTOM,
         )
-        pygame.draw.rect(screen, (255, 0, 0), roi_rect, width=2)
+
+        pts_img = [
+            (x_lt, y0),
+            (x_rt, y0),
+            (x_rb, y1),
+            (x_lb, y1),
+        ]
+
+        pts_screen = [
+            (seg_x0 + int(x * scale), seg_y0 + int(y * scale))
+            for (x, y) in pts_img
+        ]
+
+        pygame.draw.polygon(screen, (255, 0, 0), pts_screen, width=2)
 
 
 
@@ -683,38 +844,76 @@ def draw_visualizer(
 
 def compute_obstacle_proximity(seg_ids: np.ndarray) -> float:
     """
-    Look in a central-bottom ROI of the segmentation map for pedestrians/vehicles.
+    Look in a central-bottom trapezoidal ROI for pedestrians/vehicles.
 
     Returns a proximity score in [0, 1]:
       0.0 -> no obstacle in ROI
-      1.0 -> obstacle at the very bottom (very close)
+      1.0 -> obstacle near the bottom of the trapezoid (very close)
     """
     if seg_ids is None:
         return 0.0
 
     h, w = seg_ids.shape
-    y0 = max(0, min(ROI_Y_START, h))
-    y1 = max(0, min(ROI_Y_END,   h))
-    x0 = max(0, min(ROI_X_START, w))
-    x1 = max(0, min(ROI_X_END,   w))
 
-    if y1 <= y0 or x1 <= x0:
+    y0, y1, x_lt, x_rt, x_lb, x_rb = build_trapezoid_pixel_coords(
+        h, w,
+        OBST_TRAP_Y_TOP,
+        OBST_TRAP_Y_BOTTOM,
+        OBST_TRAP_X_LEFT_TOP,
+        OBST_TRAP_X_RIGHT_TOP,
+        OBST_TRAP_X_LEFT_BOTTOM,
+        OBST_TRAP_X_RIGHT_BOTTOM,
+    )
+
+    trap = trapezoid_mask(h, w, y0, y1, x_lt, x_rt, x_lb, x_rb)
+
+    # mask for "danger" pixels: pedestrians or vehicles IN the trapezoid
+    danger_mask = np.logical_and(trap, np.isin(seg_ids, list(OBSTACLE_CLASSES)))
+    if not danger_mask.any():
         return 0.0
 
-    roi = seg_ids[y0:y1, x0:x1]   # (roi_h, roi_w)
+    ys, xs = np.where(danger_mask)
+    max_y = ys.max()                 # 0 = top of image, h-1 = bottom
 
-    # mask for "danger" pixels: pedestrians or vehicles
-    mask = np.isin(roi, list(OBSTACLE_CLASSES))
-    if not mask.any():
-        return 0.0
-
-    # We approximate "closer" by how low the obstacle pixels go in the ROI
-    ys, xs = np.where(mask)
-    max_y = ys.max()                      # 0 = top of ROI, roi_h-1 = bottom
-    roi_h = roi.shape[0]
-    proximity = max_y / max(1, roi_h-1)   # ~0 top, ~1 bottom
-
+    # normalize within trapezoid vertical span
+    proximity = (max_y - y0) / max(1, (y1 - y0 - 1))
     return float(np.clip(proximity, 0.0, 1.0))
+
+
+# def compute_obstacle_proximity(seg_ids: np.ndarray) -> float:
+#     """
+#     Look in a central-bottom ROI of the segmentation map for pedestrians/vehicles.
+
+#     Returns a proximity score in [0, 1]:
+#       0.0 -> no obstacle in ROI
+#       1.0 -> obstacle at the very bottom (very close)
+#     """
+#     if seg_ids is None:
+#         return 0.0
+
+#     h, w = seg_ids.shape
+#     y0 = max(0, min(ROI_Y_START, h))
+#     y1 = max(0, min(ROI_Y_END,   h))
+#     x0 = max(0, min(ROI_X_START, w))
+#     x1 = max(0, min(ROI_X_END,   w))
+
+#     if y1 <= y0 or x1 <= x0:
+#         return 0.0
+
+#     roi = seg_ids[y0:y1, x0:x1]   # (roi_h, roi_w)
+
+#     # mask for "danger" pixels: pedestrians or vehicles
+#     mask = np.isin(roi, list(OBSTACLE_CLASSES))
+#     if not mask.any():
+#         return 0.0
+
+#     # We approximate "closer" by how low the obstacle pixels go in the ROI
+#     ys, xs = np.where(mask)
+#     max_y = ys.max()                      # 0 = top of ROI, roi_h-1 = bottom
+#     roi_h = roi.shape[0]
+#     proximity = max_y / max(1, roi_h-1)   # ~0 top, ~1 bottom
+
+#     return float(np.clip(proximity, 0.0, 1.0))
 
 def compute_min_obstacle_depth(seg_ids: np.ndarray,
                                depth_map: np.ndarray,
@@ -741,26 +940,54 @@ def compute_min_obstacle_depth(seg_ids: np.ndarray,
 
     if use_roi:
         h, w = seg_ids.shape
-        y0 = max(0, min(ROI_Y_START, h))
-        y1 = max(0, min(ROI_Y_END,   h))
-        x0 = max(0, min(ROI_X_START, w))
-        x1 = max(0, min(ROI_X_END,   w))
 
-        if y1 <= y0 or x1 <= x0:
-            return None  # bad ROI => no info
+        y0, y1, x_lt, x_rt, x_lb, x_rb = build_trapezoid_pixel_coords(
+            h, w,
+            OBST_TRAP_Y_TOP,
+            OBST_TRAP_Y_BOTTOM,
+            OBST_TRAP_X_LEFT_TOP,
+            OBST_TRAP_X_RIGHT_TOP,
+            OBST_TRAP_X_LEFT_BOTTOM,
+            OBST_TRAP_X_RIGHT_BOTTOM,
+        )
 
-        seg_roi   = seg_ids[y0:y1, x0:x1]
-        depth_roi = depth_map[y0:y1, x0:x1]
+        trap = trapezoid_mask(h, w, y0, y1, x_lt, x_rt, x_lb, x_rb)
+
+        seg_roi_mask = trap
+        depth_roi = depth_map  # we’ll index by mask below
     else:
-        seg_roi   = seg_ids
+        seg_roi_mask = np.ones_like(seg_ids, dtype=bool)
         depth_roi = depth_map
 
+    # if use_roi:
+    #     h, w = seg_ids.shape
+    #     y0 = max(0, min(ROI_Y_START, h))
+    #     y1 = max(0, min(ROI_Y_END,   h))
+    #     x0 = max(0, min(ROI_X_START, w))
+    #     x1 = max(0, min(ROI_X_END,   w))
+
+    #     if y1 <= y0 or x1 <= x0:
+    #         return None  # bad ROI => no info
+
+    #     seg_roi   = seg_ids[y0:y1, x0:x1]
+    #     depth_roi = depth_map[y0:y1, x0:x1]
+    # else:
+    #     seg_roi   = seg_ids
+    #     depth_roi = depth_map
+
     # mask of all ped/vehicle pixels in ROI
-    mask = np.isin(seg_roi, list(OBSTACLE_CLASSES))
-    if not mask.any():
+    # mask = np.isin(seg_roi, list(OBSTACLE_CLASSES))
+    # if not mask.any():
+    #     return None
+
+    # obstacle_depths = depth_roi[mask]
+    # mask of all ped/vehicle pixels within ROI mask
+    mask_obst = np.logical_and(seg_roi_mask, np.isin(seg_ids, list(OBSTACLE_CLASSES)))
+    if not mask_obst.any():
         return None
 
-    obstacle_depths = depth_roi[mask]
+    obstacle_depths = depth_map[mask_obst]
+
     obstacle_depths = obstacle_depths[np.isfinite(obstacle_depths)]
     obstacle_depths = obstacle_depths[obstacle_depths > 0.1]  # ignore junk very close to 0
 
