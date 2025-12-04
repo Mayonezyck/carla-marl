@@ -36,8 +36,11 @@ STOP_DISTANCE_M = 3.0        # within 3m of goal -> stop
 APPROACH_DISTANCE_M = 20.0   # within 20m of goal -> approach_goal
 
 
-WP_REACHED_DIST = 1.0        # how close we must get to a route point to "reach" it
+WP_REACHED_DIST = 3.0        # how close we must get to a route point to "reach" it
 
+
+current_wp_idx = -1
+final_wp_idx = -1
 
 
 
@@ -531,6 +534,14 @@ def main():
                     x_curr, y_curr = path_points[-1]
                     if x_curr != x_prev or y_curr != y_prev:
                         ego_yaw = math.atan2(y_curr - y_prev, x_curr - x_prev)
+                 # --- Initialize current_wp_idx from closest route point (first time only) ---
+                if route_points_rel and current_wp_idx < 0:
+                    current_wp_idx = select_current_waypoint(rel_x, rel_y, route_points_rel)
+                    final_wp_idx = len(route_points_rel) - 1
+                    print(f"[init] current_wp_idx set to {current_wp_idx}")
+
+
+                        
             else:
                 # If GNSS not ready (rare after origin set), keep last rel_x/rel_y
                 rel_x = rel_x if "rel_x" in locals() else 0.0
@@ -583,14 +594,14 @@ def main():
                 hy = math.sin(ego_yaw)
                 dot = dx_wp * hx + dy_wp * hy  # projection along heading
 
-                # if dot < 0, waypoint lies behind the car in heading frame
-                if dot < 0.0 and current_wp_idx < len(route_points_rel) - 1:
-                    # skip this waypoint once and aim for the next one instead
-                    current_wp_idx += 1
-                    wx, wy = route_points_rel[current_wp_idx]
-                    dx_wp = wx - rel_x
-                    dy_wp = wy - rel_y
-                    # (You could recompute dot here again if you want.)
+                # # if dot < 0, waypoint lies behind the car in heading frame
+                # if dot < 0.0 and current_wp_idx < len(route_points_rel) - 1:
+                #     # skip this waypoint once and aim for the next one instead
+                #     current_wp_idx += 1
+                #     wx, wy = route_points_rel[current_wp_idx]
+                #     dx_wp = wx - rel_x
+                #     dy_wp = wy - rel_y
+                #     # (You could recompute dot here again if you want.)
 
                 desired_yaw = math.atan2(dy_wp, dx_wp)
                 # shortest signed angle difference
