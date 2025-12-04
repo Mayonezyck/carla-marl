@@ -345,18 +345,18 @@ def detect_stop_patch(seg_ids: np.ndarray) -> bool:
     roi_vals = seg_ids[trap]
     frac = np.mean(roi_vals == ROADLINE_CLASS)
 
-    print(f"[STOP patch] frac={frac:.2f}")
+    #print(f"[STOP patch] frac={frac:.2f}")
     return frac >= STOP_PATCH_MIN_FRACTION
 
 
-
-def init_pygame(width=960, height=540):
+def init_pygame(width=1120, height=630):
     pygame.init()
     screen = pygame.display.set_mode((width, height))
-    pygame.display.set_caption("Rule-Based Agent + UNet Depth")
+    pygame.display.set_caption("Rule-Based Agent + UNet Depth + Overhead View")
     font = pygame.font.SysFont(None, 22)
     clock = pygame.time.Clock()
     return screen, font, clock
+
 
 
 def carla_rgb_to_numpy(image) -> np.ndarray:
@@ -540,6 +540,7 @@ def draw_visualizer(
     rgb_surface: pygame.Surface,
     depth_surface: pygame.Surface,
     seg_surface: pygame.Surface,
+    overhead_surface: pygame.Surface,
     path_points,
     route_points,
     rel_x,
@@ -556,142 +557,98 @@ def draw_visualizer(
     obstacle_state: str,
     min_obstacle_depth: float,
 ):
-
     """
-    Layout:
-      Top row (3 columns): RGB | Depth | Seg
-      Bottom row:
-        - Left : minimap centered on ego, with route & past trajectory
-        - Right: text HUD
+    Layout (1120 x 630):
+      Left side (2/3 width): 2x2 grid of frames
+        top-left     : RGB
+        top-right    : Depth
+        bottom-left  : Segmentation
+        bottom-right : Overhead (top-down)
+
+      Right side (1/3 width):
+        top half     : text HUD
+        bottom half  : minimap (ego-centered)
     """
     screen.fill((0, 0, 0))
     W_screen, H_screen = screen.get_size()
 
-    # Split vertical space
-    top_h = int(H_screen * 0.6)
-    bottom_h = H_screen - top_h
+    # --- Layout geometry ---
+    left_w = int(W_screen * 2 / 3)
+    right_w = W_screen - left_w
 
-    # --- Top row: three image panes ---
-    col_w = W_screen // 3
-    rect_rgb   = pygame.Rect(0 * col_w, 0, col_w, top_h)
-    rect_depth = pygame.Rect(1 * col_w, 0, col_w, top_h)
-    rect_seg   = pygame.Rect(2 * col_w, 0, col_w, top_h)
+    cell_w = left_w // 2
+    cell_h = H_screen // 2
 
-    def blit_scaled_with_roi(surface, rect, draw_roi=False):
-        """
-        Draws a surface scaled into rect.
-        If draw_roi is True, overlay the (ROI_X/Y_*) box in green,
-        assuming ROI_* are in original image coords.
-        """
+    # Frames on the left (2x2)
+    rect_rgb      = pygame.Rect(0,          0,          cell_w, cell_h)
+    rect_depth    = pygame.Rect(cell_w,     0,          cell_w, cell_h)
+    rect_seg      = pygame.Rect(0,          cell_h,     cell_w, cell_h)
+    rect_overhead = pygame.Rect(cell_w,     cell_h,     cell_w, cell_h)
+
+    # Right column
+    right_x = left_w
+    right_rect = pygame.Rect(right_x, 0, right_w, H_screen)
+
+    text_rect = pygame.Rect(
+        right_rect.left + 5,
+        right_rect.top + 5,
+        right_rect.width - 10,
+        right_rect.height // 2 - 10,
+    )
+    minimap_rect = pygame.Rect(
+        right_rect.left + 5,
+        right_rect.top + right_rect.height // 2 + 5,
+        right_rect.width - 10,
+        right_rect.height // 2 - 10,
+    )
+
+    # --- Helper: blit an image surface with aspect-preserving scale ---
+    def blit_scaled(surface, rect):
         if surface is None:
             pygame.draw.rect(screen, (40, 40, 40), rect)
-            return
+            return None, None, None
 
-        # Original image size
         img_w, img_h = surface.get_size()
-
-        # Scale to fit inside rect while keeping aspect ratio
         scale = min(rect.width / img_w, rect.height / img_h)
         new_w = int(img_w * scale)
         new_h = int(img_h * scale)
-
         surf_scaled = pygame.transform.smoothscale(surface, (new_w, new_h))
 
-        # Center it inside the rect
         pos_x = rect.left + (rect.width - new_w) // 2
         pos_y = rect.top + (rect.height - new_h) // 2
 
         screen.blit(surf_scaled, (pos_x, pos_y))
+        return pos_x, pos_y, scale
 
-        # if draw_roi:
-        #     # ROI is defined in original image coordinates (W, H)
-        #     # Map to screen coordinates using same scale + offset
-        #     roi_x = int(ROI_X_START * scale)
-        #     roi_y = int(ROI_Y_START * scale)
-        #     roi_w = int((ROI_X_END - ROI_X_START) * scale)
-        #     roi_h = int((ROI_Y_END - ROI_Y_START) * scale)
+    # --- Draw the four frames ---
+    # RGB with obstacle trapezoid overlay
+    rgb_x, rgb_y, rgb_scale = blit_scaled(rgb_surface, rect_rgb)
 
-        #     roi_rect = pygame.Rect(
-        #         pos_x + roi_x,
-        #         pos_y + roi_y,
-        #         roi_w,
-        #         roi_h,
-        #     )
-        #     pygame.draw.rect(screen, (0, 255, 0), roi_rect, width=2)
-        if draw_roi:
-            # Draw obstacle trapezoid (green) in image space then map to screen
-            img_h = img_h  # already have
-            img_w = img_w
+    if rgb_surface is not None and rgb_scale is not None:
+        img_w, img_h = rgb_surface.get_size()
+        y0, y1, x_lt, x_rt, x_lb, x_rb = build_trapezoid_pixel_coords(
+            img_h, img_w,
+            OBST_TRAP_Y_TOP,
+            OBST_TRAP_Y_BOTTOM,
+            OBST_TRAP_X_LEFT_TOP,
+            OBST_TRAP_X_RIGHT_TOP,
+            OBST_TRAP_X_LEFT_BOTTOM,
+            OBST_TRAP_X_RIGHT_BOTTOM,
+        )
+        pts_img = [(x_lt, y0), (x_rt, y0), (x_rb, y1), (x_lb, y1)]
+        pts_screen = [
+            (rgb_x + int(x * rgb_scale), rgb_y + int(y * rgb_scale))
+            for (x, y) in pts_img
+        ]
+        pygame.draw.polygon(screen, (0, 255, 0), pts_screen, width=2)
 
-            y0, y1, x_lt, x_rt, x_lb, x_rb = build_trapezoid_pixel_coords(
-                img_h, img_w,
-                OBST_TRAP_Y_TOP,
-                OBST_TRAP_Y_BOTTOM,
-                OBST_TRAP_X_LEFT_TOP,
-                OBST_TRAP_X_RIGHT_TOP,
-                OBST_TRAP_X_LEFT_BOTTOM,
-                OBST_TRAP_X_RIGHT_BOTTOM,
-            )
+    # Depth
+    blit_scaled(depth_surface, rect_depth)
 
-            pts_img = [
-                (x_lt, y0),
-                (x_rt, y0),
-                (x_rb, y1),
-                (x_lb, y1),
-            ]
-
-            pts_screen = [
-                (pos_x + int(x * scale), pos_y + int(y * scale))
-                for (x, y) in pts_img
-            ]
-
-            pygame.draw.polygon(screen, (0, 255, 0), pts_screen, width=2)
-
-
-    # Draw RGB with ROI box overlay
-    blit_scaled_with_roi(rgb_surface, rect_rgb, draw_roi=True)
-
-    # Depth & seg: no ROI box (or set True too if you want)
-    blit_scaled_with_roi(depth_surface, rect_depth, draw_roi=False)
-    blit_scaled_with_roi(seg_surface, rect_seg, draw_roi=False)
-
-    # --- Visualize STOP-sign ROI on the segmentation pane ---
-    # if seg_surface is not None:
-    #     img_w, img_h = seg_surface.get_size()
-    #     scale = min(rect_seg.width / img_w, rect_seg.height / img_h)
-    #     scaled_w = int(img_w * scale)
-    #     scaled_h = int(img_h * scale)
-
-    #     seg_x0 = rect_seg.left + (rect_seg.width  - scaled_w) // 2
-    #     seg_y0 = rect_seg.top  + (rect_seg.height - scaled_h) // 2
-
-    #     roi_x0_img = STOP_ROI_X_START
-    #     roi_x1_img = STOP_ROI_X_END
-    #     roi_y0_img = STOP_ROI_Y_START
-    #     roi_y1_img = STOP_ROI_Y_END
-
-    #     roi_x0 = seg_x0 + int(roi_x0_img * scale)
-    #     roi_x1 = seg_x0 + int(roi_x1_img * scale)
-    #     roi_y0 = seg_y0 + int(roi_y0_img * scale)
-    #     roi_y1 = seg_y0 + int(roi_y1_img * scale)
-
-    #     roi_rect = pygame.Rect(
-    #         roi_x0,
-    #         roi_y0,
-    #         roi_x1 - roi_x0,
-    #         roi_y1 - roi_y0,
-    #     )
-    #     pygame.draw.rect(screen, (255, 0, 0), roi_rect, width=2)
-    if seg_surface is not None:
+    # Seg with stop-sign trapezoid overlay
+    seg_x, seg_y, seg_scale = blit_scaled(seg_surface, rect_seg)
+    if seg_surface is not None and seg_scale is not None:
         img_w, img_h = seg_surface.get_size()
-        scale = min(rect_seg.width / img_w, rect_seg.height / img_h)
-        scaled_w = int(img_w * scale)
-        scaled_h = int(img_h * scale)
-
-        seg_x0 = rect_seg.left + (rect_seg.width  - scaled_w) // 2
-        seg_y0 = rect_seg.top  + (rect_seg.height - scaled_h) // 2
-
-        # Build stop-sign trapezoid in image coords
         y0, y1, x_lt, x_rt, x_lb, x_rb = build_trapezoid_pixel_coords(
             img_h, img_w,
             STOP_TRAP_Y_TOP,
@@ -701,80 +658,48 @@ def draw_visualizer(
             STOP_TRAP_X_LEFT_BOTTOM,
             STOP_TRAP_X_RIGHT_BOTTOM,
         )
-
-        pts_img = [
-            (x_lt, y0),
-            (x_rt, y0),
-            (x_rb, y1),
-            (x_lb, y1),
-        ]
-
+        pts_img = [(x_lt, y0), (x_rt, y0), (x_rb, y1), (x_lb, y1)]
         pts_screen = [
-            (seg_x0 + int(x * scale), seg_y0 + int(y * scale))
+            (seg_x + int(x * seg_scale), seg_y + int(y * seg_scale))
             for (x, y) in pts_img
         ]
-
         pygame.draw.polygon(screen, (255, 0, 0), pts_screen, width=2)
 
+    # Overhead camera frame
+    blit_scaled(overhead_surface, rect_overhead)
 
-
-    # --- Bottom row: minimap + text ---
-    bottom_top = top_h
-
-    bottom_left_w = W_screen // 2
-    minimap_size = min(bottom_left_w - 20, bottom_h - 20)
-    minimap_rect = pygame.Rect(
-        10,
-        bottom_top + (bottom_h - minimap_size) // 2,
-        minimap_size,
-        minimap_size,
-    )
-
-    text_area_rect = pygame.Rect(
-        bottom_left_w + 10,
-        bottom_top + 10,
-        W_screen - bottom_left_w - 20,
-        bottom_h - 20,
-    )
-
-        # ---- Minimap ----
+    # --- Minimap (bottom-right) ---
     pygame.draw.rect(screen, (20, 20, 20), minimap_rect, border_radius=5)
     cx = minimap_rect.centerx
     cy = minimap_rect.centery
-
-    scale = 2.0  # pixels per meter
+    mini_scale = 2.0  # pixels per meter
 
     def world_to_mini(px, py):
-        # center ego
         dx = px - rel_x
         dy = py - rel_y
-        sx = cx + int(dx * scale)
-        sy = cy - int(dy * scale)
+        sx = cx + int(dx * mini_scale)
+        sy = cy - int(dy * mini_scale)
         return sx, sy
 
-    # --- Route waypoints (default + special colors) ---
+    # Route waypoints
     for i, (px, py) in enumerate(route_points):
         sx, sy = world_to_mini(px, py)
         if not minimap_rect.collidepoint(sx, sy):
             continue
 
-        # Default color: yellow
         color = (255, 255, 0)
         radius = 2
 
-        # Final waypoint: magenta, larger
         if i == final_wp_idx and final_wp_idx >= 0:
             color = (255, 0, 255)
             radius = 6
-
-        # Current waypoint: orange, medium
         if i == current_wp_idx and current_wp_idx >= 0:
             color = (255, 140, 0)
             radius = 4
 
         pygame.draw.circle(screen, color, (sx, sy), radius)
 
-    # --- Past path (blue polyline) ---
+    # Past path
     if len(path_points) > 1:
         prev = None
         for px, py in path_points:
@@ -787,15 +712,14 @@ def draw_visualizer(
             else:
                 prev = None
 
-    # Ego marker (green)
+    # Ego
     ego_sx, ego_sy = world_to_mini(rel_x, rel_y)
     if minimap_rect.collidepoint(ego_sx, ego_sy):
         pygame.draw.circle(screen, (0, 255, 0), (ego_sx, ego_sy), 6)
 
     pygame.draw.rect(screen, (100, 100, 100), minimap_rect, width=1, border_radius=5)
 
-
-    # ---- Text HUD ----
+    # --- Text HUD (top-right) ---
     lines = [
         f"step: {step}",
         f"speed: {speed:.2f} m/s",
@@ -805,7 +729,6 @@ def draw_visualizer(
         f"throttle: {throttle:.2f}",
         f"brake: {brake:.2f}",
         "",
-        # GNSS-local debug
         f"ego_rel_xy: ({rel_x:.1f}, {rel_y:.1f}) m",
         f"wp_idx: {current_wp_idx}",
     ]
@@ -814,33 +737,29 @@ def draw_visualizer(
     else:
         lines.append(f"min_obs_depth: {min_obstacle_depth:.1f} m")
 
-    # If we have a valid current waypoint, show its position and distance
     if 0 <= current_wp_idx < len(route_points):
         wx, wy = route_points[current_wp_idx]
         dx_wp = wx - rel_x
         dy_wp = wy - rel_y
         dist_wp = math.hypot(dx_wp, dy_wp)
+        lines.append(f"wp_rel_xy: ({wx:.1f}, {wy:.1f}) m")
         lines.append(
-            f"wp_rel_xy: ({wx:.1f}, {wy:.1f}) m"
-        )
-        lines.append(
-            f"wp_offset_from_ego: (dx={dx_wp:.1f}, dy={dy_wp:.1f}) m, dist={dist_wp:.1f} m"
+            f"wp_offset: (dx={dx_wp:.1f}, dy={dy_wp:.1f}) m, dist={dist_wp:.1f} m"
         )
 
-    lines += [
-        "",
-        "Sensors:",
-    ] + [f" - {name}" for name in sensor_names]
+    lines += ["", "Sensors:"] + [f" - {name}" for name in sensor_names]
 
-
-    x = text_area_rect.left
-    y = text_area_rect.top
+    x = text_rect.left
+    y = text_rect.top
     for line in lines:
         surf = font.render(line, True, (255, 255, 255))
         screen.blit(surf, (x, y))
         y += 22
+        if y > text_rect.bottom - 22:
+            break  # avoid overflowing
 
     pygame.display.flip()
+
 
 def compute_obstacle_proximity(seg_ids: np.ndarray) -> float:
     """
@@ -1022,7 +941,8 @@ def main():
     world.apply_settings(settings)
 
     actors = []
-    screen, font, clock = init_pygame(width=3 * 640, height=720)
+    screen, font, clock = init_pygame(width=1120, height=630)
+
 
     depth_unet = make_unet_model()
     seg_unet = make_seg_unet_model()
@@ -1049,7 +969,8 @@ def main():
 
         # For cleanup later
         actors.append(controlled_agent)
-        # Spawn background NPC traffic (cars + pedestrians)
+
+                # Spawn background NPC traffic (cars + pedestrians)
         npc_actors = spawn_vehicles_and_walkers(
             client,
             world,
@@ -1108,6 +1029,7 @@ def main():
         latest_rgb_surface = None
         latest_depth_surface = None
         latest_seg_surface = None
+        latest_overhead_surface = None
 
         while running:
             # Pygame events
@@ -1116,6 +1038,10 @@ def main():
                     running = False
                 elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     running = False
+
+            overhead_np = controlled_agent.get_overhead_latest()
+            if overhead_np is not None:
+                latest_overhead_surface = numpy_to_pygame_surface(overhead_np)
 
             latest_cam_image = controlled_agent.get_forward_latest()
             gnss = controlled_agent.get_gnss_latest()
@@ -1399,6 +1325,7 @@ def main():
                 latest_rgb_surface,
                 latest_depth_surface,
                 latest_seg_surface,
+                latest_overhead_surface,
                 path_points,
                 route_points_rel,
                 rel_x,
@@ -1415,6 +1342,7 @@ def main():
                 obstacle_state,
                 min_obstacle_depth,
             )
+
 
             step += 1
 

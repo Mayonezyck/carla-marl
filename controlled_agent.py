@@ -94,6 +94,11 @@ class Controlled_Agents(Agent):
         self._last_depth = None           # (H, W) float32 meters
 
         self._setup_seg_depth_cameras() #NOTE: THESE GOTTA BE REPLACED BY ANDREW's unets
+
+        # --- Overhead (top-down) camera, attached to ego ---
+        self._overhead_cam_queue: "queue.Queue[tuple[int, np.ndarray]]" = queue.Queue()
+        self._last_overhead_rgb: Optional[np.ndarray] = None
+        self._setup_overhead_camera()
         
 
     def _add_other_sensors(self):
@@ -196,6 +201,51 @@ class Controlled_Agents(Agent):
             gnss.listen(_gnss_callback)
             self.sensors.append(gnss)
 
+    def _setup_overhead_camera(self) -> None:
+        """
+        Spawn an overhead RGB camera, 15 m above ego, looking straight down.
+        Used only for visualization (no ML input).
+        """
+        if self.vehicle is None:
+            return
+
+        bp_lib = self.world.get_blueprint_library()
+        cam_bp = bp_lib.find("sensor.camera.rgb")
+
+        # Resolution can be whatever you like; the pygame draw will rescale.
+        cam_bp.set_attribute("image_size_x", "640")
+        cam_bp.set_attribute("image_size_y", "480")
+        cam_bp.set_attribute("fov", "70")
+
+        overhead_tf = carla.Transform(
+            carla.Location(x=0.0, y=0.0, z=20.0),
+            # If this ever looks wrong (sky vs ground), flip pitch sign to -90.0.
+            carla.Rotation(pitch=-90.0, yaw=0.0, roll=0.0),
+        )
+
+        overhead_cam = self.world.spawn_actor(
+            cam_bp,
+            overhead_tf,
+            attach_to=self.vehicle,
+        )
+
+        def _overhead_callback(image: carla.Image):
+            import numpy as np
+            arr = np.frombuffer(image.raw_data, dtype=np.uint8)
+            arr = arr.reshape((image.height, image.width, 4))
+            bgr = arr[:, :, :3]
+            rgb = bgr[:, :, ::-1]   # BGR -> RGB
+
+            self._last_overhead_rgb = rgb
+            try:
+                self._overhead_cam_queue.put_nowait((image.frame, rgb))
+            except queue.Full:
+                pass
+
+        overhead_cam.listen(_overhead_callback)
+        self.sensors.append(overhead_cam)
+
+
 
     def _setup_forward_camera(self) -> None:
         """
@@ -256,6 +306,12 @@ class Controlled_Agents(Agent):
             (g.latitude, g.longitude, g.altitude)
             for g in self.route_geo
         ]
+
+    def get_overhead_latest(self) -> Optional[np.ndarray]:
+        """
+        Return the latest overhead RGB frame as (H, W, 3) uint8, or None.
+        """
+        return self._last_overhead_rgb
 
 
     def get_forward_latest(self) -> Optional[np.ndarray]:
