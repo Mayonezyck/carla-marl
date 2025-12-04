@@ -23,7 +23,7 @@ class Agent:
         index: int,
         config: Dict[str, Any],
         role_prefix: str,
-        seed: int
+        seed = None
     ):
         self.world = world
         self.index = index
@@ -31,7 +31,8 @@ class Agent:
         self.role_prefix = role_prefix
         self.starting_point = None
         self.destination = None
-        random.seed(seed)
+        if seed is not None:
+            random.seed(seed)
 
         self.vehicle: Optional[carla.Actor] = None
         self.sensors: List[carla.Actor] = []

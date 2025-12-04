@@ -25,6 +25,22 @@ from unet_seg_vis import make_seg_unet_model, predict_segmentation, numpy_to_pyg
 #"magma", "inferno", "plasma", "viridis"
 COLOR_MAP_FOR_DEPTH = "viridis"
 
+# --- Ego state machine constants ---
+STATE_NORMAL = "normal"
+STATE_APPROACH_GOAL = "approach_goal"
+STATE_STOP = "stop"
+
+TARGET_SPEED_NORMAL = 10.0   # m/s ~ 36 km/h
+TARGET_SPEED_APPROACH = 5.0  # m/s ~ 18 km/h
+STOP_DISTANCE_M = 3.0        # within 3m of goal -> stop
+APPROACH_DISTANCE_M = 20.0   # within 20m of goal -> approach_goal
+
+
+WP_REACHED_DIST = 1.0        # how close we must get to a route point to "reach" it
+
+
+
+
 def decode_continuous_actions(raw_actions: np.ndarray) -> np.ndarray:
     """
     raw_actions: (N, 2) in [-1, 1]
@@ -69,6 +85,70 @@ def latlon_to_xy(lat, lon, lat0, lon0):
     x = R * dlon * math.cos((lat_rad + lat0_rad) * 0.5)
     y = R * dlat
     return x, y
+
+def compute_dist_to_goal(rel_x, rel_y, route_points_rel):
+    """
+    Distance from ego (rel_x, rel_y) to final route point (in the same GNSS-local frame).
+    Returns None if no route.
+    """
+    if not route_points_rel:
+        return None
+    goal_x, goal_y = route_points_rel[-1]
+    return math.hypot(goal_x - rel_x, goal_y - rel_y)
+
+
+def select_current_waypoint(rel_x, rel_y, route_points_rel, search_radius=50.0) -> int:
+    """
+    Pick the closest route waypoint to the ego in GNSS-local frame.
+    Returns index in [0, len-1], or -1 if route is empty.
+    """
+    if not route_points_rel:
+        return -1
+
+    best_idx = -1
+    best_dist2 = float("inf")
+    max_d2 = search_radius * search_radius
+
+    # First pass: closest within search radius
+    for i, (wx, wy) in enumerate(route_points_rel):
+        dx = wx - rel_x
+        dy = wy - rel_y
+        d2 = dx * dx + dy * dy
+        if d2 < best_dist2 and d2 <= max_d2:
+            best_dist2 = d2
+            best_idx = i
+
+    # If none within radius, fall back to global closest
+    if best_idx == -1:
+        for i, (wx, wy) in enumerate(route_points_rel):
+            dx = wx - rel_x
+            dy = wy - rel_y
+            d2 = dx * dx + dy * dy
+            if d2 < best_dist2:
+                best_dist2 = d2
+                best_idx = i
+
+    return best_idx
+
+
+def update_ego_state(current_state, dist_to_goal, speed) -> str:
+    """
+    Simple state transition logic based on distance to goal (GNSS) and speed.
+    For now:
+      - if no route: default to normal
+      - if very close to goal: STOP
+      - else if moderately close: APPROACH_GOAL
+      - else: NORMAL
+    """
+    if dist_to_goal is None:
+        return STATE_NORMAL
+
+    if dist_to_goal <= STOP_DISTANCE_M:
+        return STATE_STOP
+    elif dist_to_goal <= APPROACH_DISTANCE_M:
+        return STATE_APPROACH_GOAL
+    else:
+        return STATE_NORMAL
 
 
 def init_pygame(width=960, height=540):
@@ -171,6 +251,7 @@ def draw_visualizer(
     sensor_names,
     current_wp_idx: int,
     final_wp_idx: int,
+    ego_state: str,
 ):
     """
     Layout:
@@ -292,6 +373,7 @@ def draw_visualizer(
     lines = [
         f"step: {step}",
         f"speed: {speed:.2f} m/s",
+        f"state: {ego_state}",
         f"steer: {steer:.2f}",
         f"throttle: {throttle:.2f}",
         f"brake: {brake:.2f}",
@@ -377,9 +459,17 @@ def main():
         # Ego path (GNSS-relative)
         path_points = []
 
+        # Waypoint indices along the route
+        current_wp_idx = 0 if route_points_rel else -1
+        final_wp_idx = len(route_points_rel) - 1 if route_points_rel else -1
+
+
+        # Ego state for state machine
+        ego_state = STATE_NORMAL
+        ego_yaw = 0.0
         step = 0
         running = True
-        
+
         # Prime the world once so sensors start producing data
         world.tick()
 
@@ -403,6 +493,8 @@ def main():
                 if step % 50 == 0:
                     print(f"GNSS: lat={lat:.7f}, lon={lon:.7f}, alt={alt:.2f}")
 
+
+
             if latest_cam_image is not None:
                 # Convert to numpy for UNet
                 rgb_np = carla_rgb_to_numpy(latest_cam_image)
@@ -420,18 +512,6 @@ def main():
                 latest_depth_surface = numpy_to_pygame_surface(depth_rgb)
                 latest_seg_surface = seg_np2surf(seg_rgb)
 
-            # Build obs later; for now ignore
-            obs = None
-            raw_actions = policy.act(obs, deterministic=True)  # (1, 2)
-            steer, throttle, brake = decode_continuous_actions(raw_actions)[0]
-
-            control = carla.VehicleControl()
-            control.steer = float(steer)
-            control.throttle = float(throttle)
-            control.brake = float(brake)
-            control.hand_brake = False
-            control.reverse = False
-            vehicle.apply_control(control)
 
             # ---- Ego position from GNSS only ----
             gnss = controlled_agent.get_gnss_latest()
@@ -441,30 +521,135 @@ def main():
                 rel_x, rel_y = latlon_to_xy(lat, lon, lat0, lon0)
 
                 path_points.append((rel_x, rel_y))
+                
                 if len(path_points) > 1000:
                     path_points.pop(0)
+
+                # Update ego heading from last GNSS step
+                if len(path_points) >= 2:
+                    x_prev, y_prev = path_points[-2]
+                    x_curr, y_curr = path_points[-1]
+                    if x_curr != x_prev or y_curr != y_prev:
+                        ego_yaw = math.atan2(y_curr - y_prev, x_curr - x_prev)
             else:
                 # If GNSS not ready (rare after origin set), keep last rel_x/rel_y
                 rel_x = rel_x if "rel_x" in locals() else 0.0
                 rel_y = rel_y if "rel_y" in locals() else 0.0
 
-            vel = vehicle.get_velocity() #speedometer
+            
+            # ---- Mark current waypoint as "reached" if we're close enough ----
+            if route_points_rel and current_wp_idx >= 0:
+                wx, wy = route_points_rel[current_wp_idx]
+                dist_wp = math.hypot(wx - rel_x, wy - rel_y)
+
+                if dist_wp < WP_REACHED_DIST and current_wp_idx < final_wp_idx:
+                    current_wp_idx += 1
+
+
+            vel = vehicle.get_velocity()  # speedometer
             speed = math.sqrt(vel.x**2 + vel.y**2 + vel.z**2)
+
+            # Distance to final GNSS waypoint (if any)
+            dist_to_goal = compute_dist_to_goal(rel_x, rel_y, route_points_rel)
+
+            # Update ego state based on GNSS distance + speed
+            ego_state = update_ego_state(ego_state, dist_to_goal, speed)
+
+            # # --- Select current waypoint index (GNSS-local), monotonic forward ---
+            # if route_points_rel:
+            #     raw_wp_idx = select_current_waypoint(rel_x, rel_y, route_points_rel)
+
+            #     if current_wp_idx < 0:
+            #         # first time
+            #         current_wp_idx = raw_wp_idx
+            #     else:
+            #         # do not go backwards in the route
+            #         current_wp_idx = max(current_wp_idx, raw_wp_idx)
+
+            #     final_wp_idx = len(route_points_rel) - 1
+            # else:
+            #     current_wp_idx = -1
+            #     final_wp_idx = -1
+
+            # --- Lateral control: follow route using heading error ---
+            if current_wp_idx >= 0:
+                wx, wy = route_points_rel[current_wp_idx]
+                dx_wp = wx - rel_x
+                dy_wp = wy - rel_y
+
+                # 1) Check if this waypoint is mostly behind the ego
+                # ego heading vector from ego_yaw
+                hx = math.cos(ego_yaw)
+                hy = math.sin(ego_yaw)
+                dot = dx_wp * hx + dy_wp * hy  # projection along heading
+
+                # if dot < 0, waypoint lies behind the car in heading frame
+                if dot < 0.0 and current_wp_idx < len(route_points_rel) - 1:
+                    # skip this waypoint once and aim for the next one instead
+                    current_wp_idx += 1
+                    wx, wy = route_points_rel[current_wp_idx]
+                    dx_wp = wx - rel_x
+                    dy_wp = wy - rel_y
+                    # (You could recompute dot here again if you want.)
+
+                desired_yaw = math.atan2(dy_wp, dx_wp)
+                # shortest signed angle difference
+                yaw_error = (desired_yaw - ego_yaw + math.pi) % (2.0 * math.pi) - math.pi
+
+                # if abs(yaw_error) > 0.7:  # ~40 degrees, tweak as you like
+                #     print(
+                #         f"[DEBUG yaw] step={step}, wp_idx={current_wp_idx}, "
+                #         f"dx_wp={dx_wp:.1f}, dy_wp={dy_wp:.1f}, "
+                #         f"ego_yaw={ego_yaw:.2f}, des_yaw={desired_yaw:.2f}, "
+                #         f"yaw_err={yaw_error:.2f}"
+                #     )
+
+                # small dead-zone to avoid jitter
+                if abs(yaw_error) < 0.02:  # ~1.1 degrees
+                    yaw_error = 0.0
+
+                K_STEER = 0.3  # slightly softer
+                steer = max(-1.0, min(1.0, K_STEER * yaw_error))
+            else:
+                # fallback: just go straight for now
+                steer = 0.0
+
+
+            # --- Longitudinal control from state machine ---
+            if ego_state == STATE_NORMAL:
+                target_speed = TARGET_SPEED_NORMAL
+            elif ego_state == STATE_APPROACH_GOAL:
+                target_speed = TARGET_SPEED_APPROACH
+            elif ego_state == STATE_STOP:
+                target_speed = 0.0
+            else:
+                target_speed = TARGET_SPEED_NORMAL
+
+            speed_error = target_speed - speed
+            throttle = 0.0
+            brake = 0.0
+            if speed_error > 0.5:
+                throttle = max(0.0, min(1.0, speed_error / 5.0))
+            elif speed_error < -0.5:
+                brake = max(0.0, min(1.0, -speed_error / 5.0))
+
+            control = carla.VehicleControl()
+            control.steer = float(steer)
+            control.throttle = float(throttle)
+            control.brake = float(brake)
+            control.hand_brake = False
+            control.reverse = False
+            vehicle.apply_control(control)
+
+
 
             if step % 50 == 0:
                 print(
-                    f"[step {step}] steer={steer:.2f}, thr={throttle:.2f}, "
-                    f"brk={brake:.2f}, speed={speed:.2f} m/s, rel=({rel_x:.1f},{rel_y:.1f})"
+                    f"[step {step}] state={ego_state}, dist={dist_to_goal or -1:.1f} m, "
+                    f"steer={steer:.2f}, thr={throttle:.2f}, "
+                    f"brk={brake:.2f}, speed={speed:.2f} m/s, rel=({rel_x:.1f},{rel_y:.1f}), "
+                    f"wp={current_wp_idx}"
                 )
-
-                        # Waypoint indices for coloring
-            if route_points_rel:
-                current_wp_idx = getattr(controlled_agent, "current_wp_index", 0)
-                current_wp_idx = max(0, min(current_wp_idx, len(route_points_rel) - 1))
-                final_wp_idx = len(route_points_rel) - 1
-            else:
-                current_wp_idx = -1
-                final_wp_idx = -1
 
             draw_visualizer(
                 screen,
@@ -484,6 +669,7 @@ def main():
                 sensor_names,
                 current_wp_idx,
                 final_wp_idx,
+                ego_state,
             )
 
 
