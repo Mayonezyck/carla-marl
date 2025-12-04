@@ -29,6 +29,7 @@ COLOR_MAP_FOR_DEPTH = "viridis"
 STATE_NORMAL = "normal"
 STATE_APPROACH_GOAL = "approach_goal"
 STATE_STOP = "stop"
+STATE_STOP_SIGN    = "stop_sign"  
 
 # --- Obstacle state machine constants ---
 OBST_CLEAR = "clear"
@@ -52,11 +53,25 @@ WHEELBASE_M     = 2.8  # approximate vehicle wheelbase for curvature calc
 
 # Segmentation classes we care about
 PEDESTRIAN_CLASS = 4
-VEHICLE_CLASS    = 10
+VEHICLE_CLASS    = 14
 
-ROADLINE_CLASS = 6
+ROADLINE_CLASS = 24
 TRAFFIC_SIGN_CLASS = 12
 OBSTACLE_CLASSES = {PEDESTRIAN_CLASS, VEHICLE_CLASS}
+
+
+# ROI for stop line detection (tune as needed)
+STOP_ROI_Y_START = int(H * 0.70)
+STOP_ROI_Y_END   = int(H * 0.80)
+STOP_ROI_X_START = int(W * 0.42)
+STOP_ROI_X_END   = int(W * 0.58)
+
+
+# Stop-sign patch behavior (simple ROI-based detector)
+STOP_PATCH_MIN_FRACTION   = 0.5   # 80% of ROI pixels == ROADLINE_CLASS -> STOP
+STOP_SIGN_WAIT_STEPS      = 60    # how long to wait at STOP (60 * 0.05s = 3s)
+STOP_SIGN_COOLDOWN_STEPS  = 200   # steps before we can trigger another STOP
+
 
 # ROI for "in our way" region in image coordinates (for seg_ids with shape (H, W))
 # Tune these based on your camera FOV / mounting:
@@ -171,7 +186,11 @@ def update_ego_state(current_state, dist_to_goal, speed) -> str:
       - if very close to goal: STOP
       - else if moderately close: APPROACH_GOAL
       - else: NORMAL
+      - else: Stop sign detection
     """
+    if current_state == STATE_STOP_SIGN:
+        return STATE_STOP_SIGN
+
     if dist_to_goal is None:
         return STATE_NORMAL
 
@@ -200,6 +219,35 @@ def update_obstacle_state_from_depth(current_state: str, min_depth) -> str:
         return OBST_SLOW
     else:
         return OBST_CLEAR
+
+def detect_stop_patch(seg_ids: np.ndarray) -> bool:
+    """
+    Detect a STOP marking / stop line by checking if a fixed ROI is mostly ROADLINE_CLASS.
+
+    Returns:
+      True  -> ROI is heavily roadline (likely STOP marking/line)
+      False -> otherwise
+    """
+    if seg_ids is None:
+        return False
+
+    h, w = seg_ids.shape
+    y0 = max(0, min(STOP_ROI_Y_START, h))
+    y1 = max(0, min(STOP_ROI_Y_END,   h))
+    x0 = max(0, min(STOP_ROI_X_START, w))
+    x1 = max(0, min(STOP_ROI_X_END,   w))
+
+    if y1 <= y0 or x1 <= x0:
+        return False
+
+    roi = seg_ids[y0:y1, x0:x1]
+    frac = np.mean(roi == ROADLINE_CLASS)
+    #unique_classes = np.unique(roi)
+    #print("Seg classes in frame:", unique_classes)
+    # Debug if you like:
+    print(f"[STOP patch] frac={frac:.2f}")
+
+    return frac >= STOP_PATCH_MIN_FRACTION
 
 
 
@@ -479,6 +527,35 @@ def draw_visualizer(
     blit_scaled_with_roi(depth_surface, rect_depth, draw_roi=False)
     blit_scaled_with_roi(seg_surface, rect_seg, draw_roi=False)
 
+    # --- Visualize STOP-sign ROI on the segmentation pane ---
+    if seg_surface is not None:
+        img_w, img_h = seg_surface.get_size()
+        scale = min(rect_seg.width / img_w, rect_seg.height / img_h)
+        scaled_w = int(img_w * scale)
+        scaled_h = int(img_h * scale)
+
+        seg_x0 = rect_seg.left + (rect_seg.width  - scaled_w) // 2
+        seg_y0 = rect_seg.top  + (rect_seg.height - scaled_h) // 2
+
+        roi_x0_img = STOP_ROI_X_START
+        roi_x1_img = STOP_ROI_X_END
+        roi_y0_img = STOP_ROI_Y_START
+        roi_y1_img = STOP_ROI_Y_END
+
+        roi_x0 = seg_x0 + int(roi_x0_img * scale)
+        roi_x1 = seg_x0 + int(roi_x1_img * scale)
+        roi_y0 = seg_y0 + int(roi_y0_img * scale)
+        roi_y1 = seg_y0 + int(roi_y1_img * scale)
+
+        roi_rect = pygame.Rect(
+            roi_x0,
+            roi_y0,
+            roi_x1 - roi_x0,
+            roi_y1 - roi_y0,
+        )
+        pygame.draw.rect(screen, (255, 0, 0), roi_rect, width=2)
+
+
 
     # --- Bottom row: minimap + text ---
     bottom_top = top_h
@@ -707,6 +784,14 @@ def main():
     settings = world.get_settings()
     settings.synchronous_mode = True
     settings.fixed_delta_seconds = 0.05  # 20 FPS sim
+    # weather = carla.WeatherParameters(
+    #     cloudiness=80.0,
+    #     precipitation=15.0,
+    #     precipitation_deposits=20.0,
+    #     wind_intensity=40.0,
+    #     fog_density=0.0,
+    #     sun_altitude_angle=70.0,)
+    # world.set_weather(weather)
     world.apply_settings(settings)
 
     actors = []
@@ -782,6 +867,11 @@ def main():
         step = 0
         running = True
 
+        # Stop sign handling (simple patch-based)
+        stop_sign_wait_counter = 0
+        stop_sign_cooldown_counter = 0
+        stop_patch_detected = False
+
         obstacle_state = OBST_CLEAR
         min_obstacle_depth = None
 
@@ -823,10 +913,16 @@ def main():
                 seg_rgb = predict_segmentation(seg_unet, rgb_np)
                 seg_ids = predict_segmentation_ids(seg_unet, rgb_np)  # (H, W) int32 or int64
 
+                # unique_classes = np.unique(seg_ids)
+                # print("Seg classes in frame:", unique_classes)
+
                 # Convert to pygame surfaces
                 latest_rgb_surface = numpy_to_pygame_surface(rgb_np)
                 latest_depth_surface = numpy_to_pygame_surface(depth_rgb)
                 latest_seg_surface = seg_np2surf(seg_rgb)
+
+                # --- STOP patch detection (segmentation-only) ---
+                stop_patch_detected = detect_stop_patch(seg_ids)
 
                 # 🔎 nearest obstacle distance (meters)
                 min_obstacle_depth = compute_min_obstacle_depth(seg_ids, depth_map)
@@ -885,6 +981,27 @@ def main():
 
             # Update ego state based on GNSS distance + speed
             ego_state = update_ego_state(ego_state, dist_to_goal, speed)
+            
+            # --- Stop-sign state logic (patch-based, no depth) ---
+
+            # Cooldown tick down so we don't re-trigger on the same marking
+            if stop_sign_cooldown_counter > 0:
+                stop_sign_cooldown_counter -= 1
+
+            if ego_state != STATE_STOP_SIGN:
+                # From NORMAL/APPROACH to STOP_SIGN when patch detected & off cooldown
+                if stop_patch_detected and stop_sign_cooldown_counter == 0 and ego_state in (STATE_NORMAL, STATE_APPROACH_GOAL):
+                    ego_state = STATE_STOP_SIGN
+                    stop_sign_wait_counter = 0
+            else:
+                # We are currently stopped at a STOP
+                stop_sign_wait_counter += 1
+                if stop_sign_wait_counter >= STOP_SIGN_WAIT_STEPS:
+                    # Done waiting -> resume normal driving and start cooldown
+                    ego_state = STATE_NORMAL
+                    stop_sign_wait_counter = 0
+                    stop_sign_cooldown_counter = STOP_SIGN_COOLDOWN_STEPS
+
 
             # # --- Select current waypoint index (GNSS-local), monotonic forward ---
             # if route_points_rel:
@@ -988,15 +1105,27 @@ def main():
                 steer = 0.0
 
 
-            # --- Longitudinal control: route state -> desired route speed ---
-            if ego_state == STATE_NORMAL:
-                route_speed = TARGET_SPEED_NORMAL
-            elif ego_state == STATE_APPROACH_GOAL:
-                route_speed = TARGET_SPEED_APPROACH
-            elif ego_state == STATE_STOP:
-                route_speed = 0.0
+
+            # --- Longitudinal control from route + stop sign ---
+
+            if ego_state == STATE_STOP_SIGN:
+                    route_speed = 0.0                     # at line -> full stop
             else:
-                route_speed = TARGET_SPEED_NORMAL
+                # normal route behavior
+                if ego_state == STATE_NORMAL:
+                    route_speed = TARGET_SPEED_NORMAL
+                elif ego_state == STATE_APPROACH_GOAL:
+                    route_speed = TARGET_SPEED_APPROACH
+                elif ego_state == STATE_STOP:
+                    route_speed = 0.0
+                else:
+                    route_speed = TARGET_SPEED_NORMAL
+
+            # If you also have obstacle_state/obstacle_speed_cap, do:
+            #   target_speed = min(route_speed, obstacle_speed_cap)
+            # Otherwise:
+            target_speed = route_speed
+
 
             # --- Obstacle-driven speed cap ---
             if obstacle_state == OBST_CLEAR:
