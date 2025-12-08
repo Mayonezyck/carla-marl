@@ -12,7 +12,7 @@ from remote_policy import RemoteSimPolicy
 if __name__ == "__main__": 
     #Starting Carla Client
     #config = ConfigLoader()
-    config = ConfigLoader("config_cmpe.yaml")
+    config = ConfigLoader("config.yaml")
     client = carlaClient()
     world = CarlaWorld(config)
     policy = None

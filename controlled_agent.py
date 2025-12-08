@@ -33,7 +33,7 @@ class Controlled_Agents(Agent):
     """
 
     def __init__(self, world: carla.World, index: int, config: Dict[str, Any]):
-        super().__init__(world, index, config, role_prefix="controlled_agent", seed = 119)
+        super().__init__(world, index, config, role_prefix="controlled_agent")
         # self.starting_point: carla.Location = (
         #     self.vehicle.get_transform().location if self.vehicle is not None else None
         # )

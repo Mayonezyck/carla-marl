@@ -35,6 +35,7 @@ STATE_STOP_SIGN    = "stop_sign"
 OBST_CLEAR = "clear"
 OBST_SLOW  = "slow"
 OBST_STOP  = "stop_for_obstacle"
+OBST_RECOVER = "recover"
 
 # # Obstacle distance thresholds (meters) for behavior
 # OBST_STOP_DIST = 6.0    # <= this -> full stop
@@ -223,30 +224,26 @@ def update_obstacle_state_from_depth(current_state: str,
                                      speed: float) -> str:
     """
     Decide obstacle state from the nearest obstacle depth (in meters)
-    and current speed (m/s).
+    and current speed (m/s), unless we're in OBST_RECOVER – that is
+    handled by the higher-level logic.
     """
+    # 🔒 Don't override recovery state here – let the outer logic decide when to exit
+    if current_state == OBST_RECOVER:
+        return OBST_RECOVER
+
     if min_depth is None or not np.isfinite(min_depth):
         return OBST_CLEAR
 
-    # Clamp speed so thresholds don't collapse to ~0 at very low speed
     v = max(speed, 0.1)  # m/s
 
-    # Time horizons (seconds)
-    STOP_TIME  = 1.0   # ~1 s to obstacle -> stop
-    SLOW_TIME  = 2.0   # ~2 s -> slow
-    CLEAR_TIME = 4.0   # ~4 s -> very comfortable
+    STOP_TIME  = 1.0
+    SLOW_TIME  = 2.0
+    CLEAR_TIME = 4.0
 
-    # Convert to distance thresholds
-    stop_dist  = v * STOP_TIME
-    slow_dist  = v * SLOW_TIME
-    clear_dist = v * CLEAR_TIME
+    stop_dist  = max(v * STOP_TIME,  3.0)
+    slow_dist  = max(v * SLOW_TIME,  6.0)
+    clear_dist = max(v * CLEAR_TIME, 12.0)
 
-    # Optional: enforce some minimums so at low speed you still react early
-    stop_dist  = max(stop_dist,  3.0)   # at least 3 m
-    slow_dist  = max(slow_dist,  6.0)   # at least 6 m
-    clear_dist = max(clear_dist, 12.0)  # at least 12 m
-
-    # Now classify
     if min_depth <= stop_dist:
         return OBST_STOP
     elif min_depth <= slow_dist:
@@ -254,7 +251,6 @@ def update_obstacle_state_from_depth(current_state: str,
     elif min_depth >= clear_dist:
         return OBST_CLEAR
     else:
-        # In between slow_dist and clear_dist -> mildly cautious
         return OBST_SLOW
 
 
@@ -860,12 +856,13 @@ def compute_min_obstacle_depth(seg_ids: np.ndarray,
     Use segmentation + depth to estimate the nearest obstacle distance.
 
     Returns:
-      (min_depth, class_id) where:
+      (min_depth, class_id, y_px, x_px) where:
         - min_depth: float in meters, or None if no obstacle
         - class_id : int (segmentation class index) of that nearest obstacle, or None
+        - y_px, x_px: pixel coordinates of that nearest obstacle pixel, or (None, None)
     """
     if seg_ids is None or depth_map is None:
-        return None, None
+        return None, None, None, None
 
     if seg_ids.shape != depth_map.shape:
         raise ValueError(f"seg_ids shape {seg_ids.shape} != depth_map shape {depth_map.shape}")
@@ -884,7 +881,6 @@ def compute_min_obstacle_depth(seg_ids: np.ndarray,
         )
 
         trap = trapezoid_mask(h, w, y0, y1, x_lt, x_rt, x_lb, x_rb)
-
         roi_mask = trap
     else:
         roi_mask = np.ones_like(seg_ids, dtype=bool)
@@ -892,7 +888,7 @@ def compute_min_obstacle_depth(seg_ids: np.ndarray,
     # pixels that are both in ROI and belong to an obstacle class
     mask_obst = np.logical_and(roi_mask, np.isin(seg_ids, list(OBSTACLE_CLASSES)))
     if not mask_obst.any():
-        return None, None
+        return None, None, None, None
 
     ys, xs = np.where(mask_obst)
     depths = depth_map[ys, xs]
@@ -900,7 +896,7 @@ def compute_min_obstacle_depth(seg_ids: np.ndarray,
     # keep only valid depths
     valid = np.isfinite(depths) & (depths > 0.1)
     if not valid.any():
-        return None, None
+        return None, None, None, None
 
     depths_valid = depths[valid]
     ys_valid = ys[valid]
@@ -909,10 +905,14 @@ def compute_min_obstacle_depth(seg_ids: np.ndarray,
     idx_min = int(np.argmin(depths_valid))
     min_depth = float(depths_valid[idx_min])
 
-    # nearest pixel's class id
-    class_id = int(seg_ids[ys_valid[idx_min], xs_valid[idx_min]])
+    # nearest pixel's class id and location
+    y_px = int(ys_valid[idx_min])
+    x_px = int(xs_valid[idx_min])
+    class_id = int(seg_ids[y_px, x_px])
 
-    return min_depth, class_id
+    return min_depth, class_id, y_px, x_px
+
+
 
 
 
@@ -952,6 +952,10 @@ def main():
     latest_cam_image = None
 
     sensor_names = ["RGB Camera (front)"]
+    obst_stop_steps = 0      # how long we have been in OBST_STOP
+    recovery_steps = 0       # how long we've been trying to recover
+    recovery_steer = 0.0     # steering command for recovery mode
+
 
     try:
         # ---- Spawn vehicle via our custom Controlled_Agents ----
@@ -1022,6 +1026,8 @@ def main():
         obstacle_state = OBST_CLEAR
         min_obstacle_depth = None
         min_obstacle_class = None  
+        min_obst_x_px = None
+        min_obst_y_px = None
 
         # Prime the world once so sensors start producing data
         world.tick()
@@ -1081,10 +1087,11 @@ def main():
                 # 🔎 nearest obstacle distance (meters) + class id
                 prev_obstacle_state = obstacle_state  # track old state
 
-                min_obstacle_depth, min_obstacle_class = compute_min_obstacle_depth(
+                min_obstacle_depth, min_obstacle_class, min_obst_y_px, min_obst_x_px = compute_min_obstacle_depth(
                     seg_ids,
                     depth_map,
                 )
+
 
                 # update obstacle state using distance
                 obstacle_state = update_obstacle_state_from_depth(
@@ -1102,6 +1109,86 @@ def main():
                         f"[OBST STOP] class_id={min_obstacle_class} "
                         f"at {min_obstacle_depth:.1f} m"
                     )
+
+                # --- Stuck detection & recovery mode ---
+
+                # count how long we've been in a hard stop with (almost) no speed
+                if obstacle_state == OBST_STOP and speed < 0.5:
+                    obst_stop_steps += 1
+                else:
+                    obst_stop_steps = 0
+
+                if obstacle_state == OBST_RECOVER:
+                    recovery_steps += 1
+                else:
+                    recovery_steps = 0
+
+                # default recovery steer is neutral
+                recovery_steer = 0.0
+
+                # Enter RECOVER if we are stuck in OBST_STOP for a long time
+                RECOVER_TRIGGER_STEPS = 200   # ≈ 30s at 20Hz
+                if (obstacle_state == OBST_STOP and
+                    obst_stop_steps > RECOVER_TRIGGER_STEPS and
+                    min_obst_x_px is not None and
+                    min_obst_y_px is not None):
+
+                    print("[RECOVER] Entering recovery mode (stuck in OBST_STOP).")
+                    obstacle_state = OBST_RECOVER
+                    obst_stop_steps = 0
+                    recovery_steps = 0
+
+                # Exit RECOVER after some time or when obstacle is gone / far
+                RECOVER_MAX_STEPS = 200       # try for ~10s
+                if obstacle_state == OBST_RECOVER:
+                    # condition to give up recovery
+                    if (recovery_steps > RECOVER_MAX_STEPS or
+                        min_obstacle_depth is None or
+                        (min_obstacle_depth is not None and min_obstacle_depth > 8.0) or
+                        speed > 3.0):
+                        print("[RECOVER] Exiting recovery mode.")
+                        obstacle_state = OBST_CLEAR
+                        recovery_steps = 0
+
+                # If we are in RECOVER, compute a steering hint away from nearest obstacle
+                if obstacle_state == OBST_RECOVER and min_obst_x_px is not None:
+                    h, w = seg_ids.shape
+
+                    # approximate trapezoid bottom center and half-width in pixels
+                    y0, y1, x_lt, x_rt, x_lb, x_rb = build_trapezoid_pixel_coords(
+                        h, w,
+                        OBST_TRAP_Y_TOP,
+                        OBST_TRAP_Y_BOTTOM,
+                        OBST_TRAP_X_LEFT_TOP,
+                        OBST_TRAP_X_RIGHT_TOP,
+                        OBST_TRAP_X_LEFT_BOTTOM,
+                        OBST_TRAP_X_RIGHT_BOTTOM,
+                    )
+                    center_x = 0.5 * (x_lb + x_rb)
+                    half_width = max(1.0, 0.5 * (x_rb - x_lb))
+
+                    # normalized horizontal offset: -1 = left edge, +1 = right edge
+                    offset_norm = float((min_obst_x_px - center_x) / half_width)
+                    offset_norm = np.clip(offset_norm, -1.0, 1.0)
+
+                    # We want to steer *away* from obstacle:
+                    # obstacle left (offset<0) -> steer right (positive)
+                    # obstacle right (offset>0) -> steer left (negative)
+                    base_steer = 0.5   # max steering in recovery
+                    # reduce effort if close to centerline
+                    mag = abs(offset_norm)
+                    if mag < 0.2:
+                        # obstacle almost in front -> very gentle or no recovery
+                        recovery_steer = 0.0
+                    else:
+                        recovery_steer = -offset_norm * base_steer * mag
+
+                    # clamp
+                    recovery_steer = float(max(-1.0, min(1.0, recovery_steer)))
+
+                    # Optional debug print
+                    # print(f"[RECOVER] offset_norm={offset_norm:.2f}, recovery_steer={recovery_steer:.2f}")
+
 
             # ---- Ego position from GNSS only ----
             gnss = controlled_agent.get_gnss_latest()
@@ -1238,6 +1325,11 @@ def main():
                 # don't keep spinning the steering wheel.
                 steer = 0.0
 
+                        
+            elif obstacle_state == OBST_RECOVER:
+                # In recovery: ignore pure pursuit and steer away from obstacle
+                steer = recovery_steer
+
             elif current_wp_idx >= 0 and route_points_rel:
                 # 1) Choose a lookahead waypoint along the route
                 lookahead_idx = min(current_wp_idx + LOOKAHEAD_STEPS, final_wp_idx)
@@ -1304,8 +1396,11 @@ def main():
                 obstacle_speed_cap = TARGET_SPEED_APPROACH
             elif obstacle_state == OBST_STOP:
                 obstacle_speed_cap = 0.0
+            elif obstacle_state == OBST_RECOVER:
+                obstacle_speed_cap = 4.0    # creep at low speed during recovery
             else:
                 obstacle_speed_cap = TARGET_SPEED_NORMAL
+
 
             target_speed = min(route_speed, obstacle_speed_cap)
 
@@ -1333,7 +1428,11 @@ def main():
                     # Almost fully stopped -> just "hold" the car in place lightly
                     brake = max(brake, 0.2)
 
-            
+            elif obstacle_state == OBST_RECOVER:
+                # In recovery: encourage a small push forward if we are too slow
+                if speed < 1.0:
+                    throttle = max(throttle, 0.5)
+                    brake = 0.0
 
             control = carla.VehicleControl()
             control.steer = float(steer)
